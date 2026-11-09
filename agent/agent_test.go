@@ -2,14 +2,16 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrsibe/goat/agent"
 	"github.com/mrsibe/goat/ai"
-	"github.com/mrsibe/goat/internal/faux"
+	"github.com/mrsibe/goat/ai/faux"
 )
 
 func TestRunDirectAnswer(t *testing.T) {
@@ -69,11 +71,11 @@ func TestRunExecutesToolAndContinues(t *testing.T) {
 		faux.Turn{Events: []ai.Event{
 			{Type: ai.EventStart},
 			{Type: ai.EventTextDelta, TextDelta: "先查天气"},
-			{Type: ai.EventToolCallDelta, ToolCall: &ai.ToolCallDelta{
-				Index: 0, ID: "call_1", Name: "weather", ArgumentsDelta: `{"city":`,
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{
+				ID: "call_1", Name: "weather", ArgumentsDelta: `{"city":`,
 			}},
-			{Type: ai.EventToolCallDelta, ToolCall: &ai.ToolCallDelta{
-				Index: 0, ArgumentsDelta: `"北京"}`,
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{
+				ArgumentsDelta: `"北京"}`,
 			}},
 			{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
 		}},
@@ -84,7 +86,7 @@ func TestRunExecutesToolAndContinues(t *testing.T) {
 		}},
 	)
 	var received ai.ToolCall
-	weather := agent.NewTool(ai.ToolSpec{Name: "weather"}, func(_ context.Context, call ai.ToolCall) (string, error) {
+	weather := agent.NewTextTool(ai.ToolSpec{Name: "weather"}, func(_ context.Context, call ai.ToolCall) (string, error) {
 		received = call
 		return "sunny", nil
 	})
@@ -132,6 +134,46 @@ func TestRunExecutesToolAndContinues(t *testing.T) {
 	}
 }
 
+func TestToolCallLifecycleWithoutDoneMessage(t *testing.T) {
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventStart},
+			{Type: ai.EventToolCallStart, ContentIndex: 0, ToolCall: &ai.ToolCall{
+				ID: "call_1", Name: "weather", Arguments: json.RawMessage(`{}`),
+			}},
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{
+				ID: "call_1", Name: "weather", ArgumentsDelta: `{"city":`,
+			}},
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{
+				ID: "call_1", Name: "weather", ArgumentsDelta: `"北京"}`,
+			}},
+			{Type: ai.EventToolCallEnd, ContentIndex: 0, ToolCall: &ai.ToolCall{
+				ID: "call_1", Name: "weather", Arguments: json.RawMessage(`{"city":"北京"}`),
+			}},
+			{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "done"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	var received ai.ToolCall
+	weather := agent.NewTextTool(ai.ToolSpec{Name: "weather"}, func(_ context.Context, call ai.ToolCall) (string, error) {
+		received = call
+		return "sunny", nil
+	})
+	assistant, err := agent.New(agent.Config{Model: model, Tools: []agent.Tool{weather}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := assistant.Run(context.Background(), "天气"); err != nil {
+		t.Fatal(err)
+	}
+	if received.Name != "weather" || string(received.Arguments) != `{"city":"北京"}` {
+		t.Fatalf("received call = %+v", received)
+	}
+}
+
 func TestToolErrorsAreObservations(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
@@ -139,13 +181,13 @@ func TestToolErrorsAreObservations(t *testing.T) {
 	}{
 		{
 			name: "tool error",
-			tool: agent.NewTool(ai.ToolSpec{Name: "weather"}, func(context.Context, ai.ToolCall) (string, error) {
+			tool: agent.NewTextTool(ai.ToolSpec{Name: "weather"}, func(context.Context, ai.ToolCall) (string, error) {
 				return "", errors.New("upstream failed")
 			}),
 		},
 		{
 			name: "panic",
-			tool: agent.NewTool(ai.ToolSpec{Name: "weather"}, func(context.Context, ai.ToolCall) (string, error) {
+			tool: agent.NewTextTool(ai.ToolSpec{Name: "weather"}, func(context.Context, ai.ToolCall) (string, error) {
 				panic("boom")
 			}),
 		},
@@ -153,7 +195,7 @@ func TestToolErrorsAreObservations(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			model := faux.New(
 				faux.Turn{Events: []ai.Event{
-					{Type: ai.EventToolCallDelta, ToolCall: &ai.ToolCallDelta{Index: 0, ID: "call_1", Name: "weather", ArgumentsDelta: "{}"}},
+					{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{ID: "call_1", Name: "weather", ArgumentsDelta: "{}"}},
 					{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
 				}},
 				faux.Turn{Events: []ai.Event{
@@ -176,14 +218,17 @@ func TestToolErrorsAreObservations(t *testing.T) {
 			if !strings.Contains(toolMessage.Text(), "failed") && !strings.Contains(toolMessage.Text(), "panicked") {
 				t.Fatalf("tool observation = %q", toolMessage.Text())
 			}
+			if !toolMessage.IsError {
+				t.Fatal("tool error was not preserved in message history")
+			}
 		})
 	}
 }
 
-func TestUnknownToolAndHooks(t *testing.T) {
+func TestBeforeToolCallCanBlock(t *testing.T) {
 	model := faux.New(
 		faux.Turn{Events: []ai.Event{
-			{Type: ai.EventToolCallDelta, ToolCall: &ai.ToolCallDelta{Index: 0, ID: "call_1", Name: "missing", ArgumentsDelta: "{}"}},
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{ID: "call_1", Name: "echo", ArgumentsDelta: "{}"}},
 			{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
 		}},
 		faux.Turn{Events: []ai.Event{
@@ -191,9 +236,13 @@ func TestUnknownToolAndHooks(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
+	echo := agent.NewTextTool(ai.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+		return "ok", nil
+	})
 	var beforeCalled bool
 	assistant, err := agent.New(agent.Config{
 		Model: model,
+		Tools: []agent.Tool{echo},
 		BeforeToolCall: func(context.Context, ai.ToolCall) error {
 			beforeCalled = true
 			return errors.New("blocked by policy")
@@ -214,13 +263,38 @@ func TestUnknownToolAndHooks(t *testing.T) {
 	}
 }
 
+func TestUnknownToolIsObservation(t *testing.T) {
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{ID: "call_1", Name: "missing", ArgumentsDelta: "{}"}},
+			{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "done"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	assistant, err := agent.New(agent.Config{Model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assistant.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolMessage := result.Messages[2]
+	if !toolMessage.IsError || !strings.Contains(toolMessage.Text(), "unknown tool") {
+		t.Fatalf("tool message = %+v", toolMessage)
+	}
+}
+
 func TestMaxStepsAndHistoryRestore(t *testing.T) {
 	turn := faux.Turn{Events: []ai.Event{
-		{Type: ai.EventToolCallDelta, ToolCall: &ai.ToolCallDelta{Index: 0, ID: "call_1", Name: "echo", ArgumentsDelta: "{}"}},
+		{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{ID: "call_1", Name: "echo", ArgumentsDelta: "{}"}},
 		{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
 	}}
 	model := faux.New(turn, turn)
-	echo := agent.NewTool(ai.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(ai.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
 		return "ok", nil
 	})
 	assistant, err := agent.New(agent.Config{Model: model, Tools: []agent.Tool{echo}, MaxSteps: 2})
@@ -259,10 +333,495 @@ func TestOutputLengthIsFatal(t *testing.T) {
 	}
 }
 
+func TestOutputLengthDoesNotExecuteToolCalls(t *testing.T) {
+	call := ai.ToolCall{
+		ID: "call_1", Name: "weather", Arguments: json.RawMessage(`{"city":"北京"}`),
+	}
+	truncated := ai.Message{
+		Role: ai.RoleAssistant,
+		Content: []ai.ContentBlock{{
+			Type: ai.BlockToolCall, ToolCall: &call,
+		}},
+	}
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventDone, Message: &truncated, StopReason: ai.StopReasonLength},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "recovered"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	executed := false
+	weather := agent.NewTextTool(ai.ToolSpec{
+		Name: "weather",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"city": map[string]any{"type": "string"},
+			},
+			"required": []string{"city"},
+		},
+	}, func(context.Context, ai.ToolCall) (string, error) {
+		executed = true
+		return "sunny", nil
+	})
+	assistant, err := agent.New(agent.Config{Model: model, Tools: []agent.Tool{weather}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assistant.Run(context.Background(), "天气")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executed {
+		t.Fatal("truncated tool call was executed")
+	}
+	if result.Answer != "recovered" || result.Steps != 2 {
+		t.Fatalf("result = %+v", result)
+	}
+	toolMessage := result.Messages[2]
+	if toolMessage.Role != ai.RoleTool || !toolMessage.IsError ||
+		!strings.Contains(toolMessage.Text(), "output token limit") {
+		t.Fatalf("tool message = %+v", toolMessage)
+	}
+}
+
+func TestInvalidToolArgumentsAreRejected(t *testing.T) {
+	call := ai.ToolCall{
+		ID: "call_1", Name: "weather", Arguments: json.RawMessage(`{"city":123}`),
+	}
+	assistantCall := ai.Message{
+		Role: ai.RoleAssistant,
+		Content: []ai.ContentBlock{{
+			Type: ai.BlockToolCall, ToolCall: &call,
+		}},
+	}
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventDone, Message: &assistantCall, StopReason: ai.StopReasonToolCalls},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "recovered"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	executed := false
+	weather := agent.NewTextTool(ai.ToolSpec{
+		Name: "weather",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"city": map[string]any{"type": "string"},
+			},
+			"required": []string{"city"},
+		},
+	}, func(context.Context, ai.ToolCall) (string, error) {
+		executed = true
+		return "sunny", nil
+	})
+	assistant, err := agent.New(agent.Config{Model: model, Tools: []agent.Tool{weather}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assistant.Run(context.Background(), "天气")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executed {
+		t.Fatal("invalid tool arguments were executed")
+	}
+	toolMessage := result.Messages[2]
+	if !toolMessage.IsError || !strings.Contains(toolMessage.Text(), "expected string") {
+		t.Fatalf("tool message = %+v", toolMessage)
+	}
+}
+
+func TestModelErrorStopIsFatal(t *testing.T) {
+	model := faux.New(faux.Turn{Events: []ai.Event{
+		{Type: ai.EventTextDelta, TextDelta: "partial"},
+		{Type: ai.EventDone, StopReason: ai.StopReasonError},
+	}})
+	assistant, err := agent.New(agent.Config{Model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assistant.Run(context.Background(), "go")
+	if !errors.Is(err, agent.ErrModelStop) {
+		t.Fatalf("error = %v", err)
+	}
+	if result.Answer != "partial" {
+		t.Fatalf("answer = %q", result.Answer)
+	}
+}
+
+func TestDoneMessageAndUsageAreAuthoritative(t *testing.T) {
+	final := ai.TextMessage(ai.RoleAssistant, "final")
+	model := faux.New(faux.Turn{Events: []ai.Event{
+		{Type: ai.EventTextDelta, TextDelta: "ignored"},
+		{Type: ai.EventDone, Message: &final, StopReason: ai.StopReasonStop, Usage: &ai.Usage{
+			PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12,
+		}},
+	}})
+	assistant, err := agent.New(agent.Config{Model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assistant.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Answer != "final" {
+		t.Fatalf("answer = %q", result.Answer)
+	}
+	if result.Usage.TotalTokens != 12 {
+		t.Fatalf("usage = %+v", result.Usage)
+	}
+}
+
+func TestStreamErrorEventIsFatal(t *testing.T) {
+	streamErr := errors.New("provider failed")
+	partial := ai.TextMessage(ai.RoleAssistant, "partial")
+	model := faux.New(faux.Turn{Events: []ai.Event{
+		{Type: ai.EventTextDelta, TextDelta: "partial"},
+		{
+			Type:       ai.EventError,
+			Err:        streamErr,
+			Message:    &partial,
+			Usage:      &ai.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12},
+			StopReason: ai.StopReasonError,
+		},
+	}})
+	assistant, err := agent.New(agent.Config{Model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []agent.Event
+	result, err := assistant.Run(context.Background(), "go", agent.WithOnEvent(func(event agent.Event) {
+		events = append(events, event)
+	}))
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("error = %v", err)
+	}
+	if result.Answer != "partial" || result.Usage.TotalTokens != 12 {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(result.Messages) != 2 || result.Messages[1].Text() != "partial" {
+		t.Fatalf("messages = %+v", result.Messages)
+	}
+	if !strings.Contains(strings.Join(eventTypeStrings(events), ","), "turn_end,agent_error") {
+		t.Fatalf("events = %v", eventTypeStrings(events))
+	}
+}
+
+func TestThinkingEventsAndSignaturesArePreserved(t *testing.T) {
+	final := ai.Message{
+		Role: ai.RoleAssistant,
+		Content: []ai.ContentBlock{
+			{Type: ai.BlockThinking, Thinking: "plan", Signature: "sig"},
+			{Type: ai.BlockText, Text: "answer"},
+		},
+	}
+	model := faux.New(faux.Turn{Events: []ai.Event{
+		{Type: ai.EventThinkingStart},
+		{Type: ai.EventThinkingDelta, ThinkingDelta: "plan"},
+		{Type: ai.EventThinkingEnd, Thinking: "plan"},
+		{Type: ai.EventTextDelta, TextDelta: "answer"},
+		{Type: ai.EventDone, Message: &final, StopReason: ai.StopReasonStop},
+	}})
+	assistant, err := agent.New(agent.Config{Model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []agent.Event
+	result, err := assistant.Run(context.Background(), "go", agent.WithOnEvent(func(event agent.Event) {
+		events = append(events, event)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Answer != "answer" || result.Messages[1].Thinking() != "plan" {
+		t.Fatalf("result = %+v", result)
+	}
+	if got := result.Messages[1].Content[0].Signature; got != "sig" {
+		t.Fatalf("thinking signature = %q", got)
+	}
+	for _, eventType := range []agent.EventType{
+		agent.EventThinkingStart,
+		agent.EventThinkingDelta,
+		agent.EventThinkingEnd,
+	} {
+		found := false
+		for _, event := range events {
+			if event.Type == eventType {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing %s in %v", eventType, eventTypeStrings(events))
+		}
+	}
+}
+
+func TestParallelToolExecutionPreservesModelOrder(t *testing.T) {
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{
+				ID: "call_slow", Name: "slow", ArgumentsDelta: "{}",
+			}},
+			{Type: ai.EventToolCallDelta, ContentIndex: 1, ToolCallDelta: &ai.ToolCallDelta{
+				ID: "call_fast", Name: "fast", ArgumentsDelta: "{}",
+			}},
+			{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "done"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	slowStarted := make(chan struct{})
+	fastDone := make(chan struct{})
+	slow := agent.NewTextTool(ai.ToolSpec{Name: "slow"}, func(ctx context.Context, _ ai.ToolCall) (string, error) {
+		close(slowStarted)
+		select {
+		case <-fastDone:
+			return "slow result", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	})
+	fast := agent.NewTextTool(ai.ToolSpec{Name: "fast"}, func(ctx context.Context, _ ai.ToolCall) (string, error) {
+		select {
+		case <-slowStarted:
+			close(fastDone)
+			return "fast result", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	})
+	assistant, err := agent.New(agent.Config{
+		Model:         model,
+		Tools:         []agent.Tool{slow, fast},
+		ToolExecution: agent.ToolExecutionParallel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result, err := assistant.Run(ctx, "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Answer != "done" {
+		t.Fatalf("answer = %q", result.Answer)
+	}
+	slowMessage := result.Messages[2]
+	fastMessage := result.Messages[3]
+	if slowMessage.ToolCallID != "call_slow" || slowMessage.ToolName != "slow" ||
+		slowMessage.Text() != "slow result" {
+		t.Fatalf("slow message = %+v", slowMessage)
+	}
+	if fastMessage.ToolCallID != "call_fast" || fastMessage.ToolName != "fast" ||
+		fastMessage.Text() != "fast result" {
+		t.Fatalf("fast message = %+v", fastMessage)
+	}
+}
+
+func TestTransformMessagesAndRequestOptions(t *testing.T) {
+	temperature := 0.2
+	maxTokens := 128
+	overrideTemperature := 0.8
+	topP := 0.9
+	model := faux.New(faux.Turn{Events: []ai.Event{
+		{Type: ai.EventTextDelta, TextDelta: "ok"},
+		{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+	}})
+	transformed := false
+	assistant, err := agent.New(agent.Config{
+		Model: model,
+		RequestOptions: ai.RequestOptions{
+			Temperature: &temperature,
+			MaxTokens:   maxTokens,
+		},
+		TransformMessages: func(_ context.Context, messages []ai.Message) ([]ai.Message, error) {
+			transformed = true
+			return append(messages, ai.TextMessage(ai.RoleUser, "injected")), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assistant.Run(
+		context.Background(),
+		"hello",
+		agent.WithRequestOptions(ai.RequestOptions{
+			Temperature: &overrideTemperature,
+			TopP:        &topP,
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transformed {
+		t.Fatal("message transformer was not called")
+	}
+	if len(model.Requests) != 1 {
+		t.Fatalf("requests = %d", len(model.Requests))
+	}
+	request := model.Requests[0]
+	if len(request.Messages) != 2 || request.Messages[1].Text() != "injected" {
+		t.Fatalf("transformed messages = %+v", request.Messages)
+	}
+	options := request.Options
+	if options.Temperature == nil || *options.Temperature != overrideTemperature {
+		t.Fatalf("temperature = %v", options.Temperature)
+	}
+	if options.TopP == nil || *options.TopP != topP {
+		t.Fatalf("top_p = %v", options.TopP)
+	}
+	if options.MaxTokens != maxTokens {
+		t.Fatalf("max tokens = %d", options.MaxTokens)
+	}
+	if len(result.Messages) != 2 {
+		t.Fatalf("session was polluted by transformed messages: %+v", result.Messages)
+	}
+}
+
+func TestToolResultImagesArePreserved(t *testing.T) {
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{
+				ID: "call_1", Name: "screenshot", ArgumentsDelta: "{}",
+			}},
+			{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "done"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	screenshot := agent.NewTool(ai.ToolSpec{Name: "screenshot"}, func(context.Context, ai.ToolCall) (agent.ToolResult, error) {
+		return agent.ToolResult{Content: []ai.ContentBlock{
+			{Type: ai.BlockText, Text: "preview"},
+			{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MediaType: "image/png"}},
+		}}, nil
+	})
+	assistant, err := agent.New(agent.Config{Model: model, Tools: []agent.Tool{screenshot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assistant.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolMessage := result.Messages[2]
+	if toolMessage.IsError || len(toolMessage.Content) != 2 ||
+		toolMessage.Content[1].Type != ai.BlockImage ||
+		toolMessage.Content[1].Image == nil ||
+		toolMessage.Content[1].Image.MediaType != "image/png" {
+		t.Fatalf("tool message = %+v", toolMessage)
+	}
+	requestToolMessage := model.Requests[1].Messages[2]
+	if len(requestToolMessage.Content) != 2 || requestToolMessage.Content[1].Image == nil {
+		t.Fatalf("request tool message = %+v", requestToolMessage)
+	}
+}
+
+func TestInvalidToolResultBecomesErrorObservation(t *testing.T) {
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{
+				ID: "call_1", Name: "screenshot", ArgumentsDelta: "{}",
+			}},
+			{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "done"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	screenshot := agent.NewTool(ai.ToolSpec{Name: "screenshot"}, func(context.Context, ai.ToolCall) (agent.ToolResult, error) {
+		return agent.ToolResult{Content: []ai.ContentBlock{{
+			Type: ai.BlockImage,
+			Image: &ai.ImageContent{
+				Data:      "aGVsbG8=",
+				URL:       "https://example.test/image.png",
+				MediaType: "image/png",
+			},
+		}}}, nil
+	})
+	assistant, err := agent.New(agent.Config{Model: model, Tools: []agent.Tool{screenshot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assistant.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolMessage := result.Messages[2]
+	if !toolMessage.IsError || !strings.Contains(toolMessage.Text(), "exactly one") {
+		t.Fatalf("tool message = %+v", toolMessage)
+	}
+}
+
+func TestStreamedArgumentErrorIsObservation(t *testing.T) {
+	call := ai.ToolCall{
+		ID:             "call_1",
+		Name:           "weather",
+		Arguments:      json.RawMessage(`{}`),
+		ArgumentsError: "tool call arguments are not valid JSON",
+	}
+	assistantCall := ai.Message{
+		Role: ai.RoleAssistant,
+		Content: []ai.ContentBlock{{
+			Type: ai.BlockToolCall, ToolCall: &call,
+		}},
+	}
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventDone, Message: &assistantCall, StopReason: ai.StopReasonToolCalls},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "recovered"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	executed := false
+	weather := agent.NewTextTool(ai.ToolSpec{Name: "weather"}, func(context.Context, ai.ToolCall) (string, error) {
+		executed = true
+		return "sunny", nil
+	})
+	assistant, err := agent.New(agent.Config{Model: model, Tools: []agent.Tool{weather}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := assistant.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executed {
+		t.Fatal("tool with invalid streamed arguments was executed")
+	}
+	toolMessage := result.Messages[2]
+	if !toolMessage.IsError || !strings.Contains(toolMessage.Text(), "not valid JSON") {
+		t.Fatalf("tool message = %+v", toolMessage)
+	}
+}
+
 func eventTypes(events []agent.Event) []agent.EventType {
 	types := make([]agent.EventType, len(events))
 	for i, event := range events {
 		types[i] = event.Type
+	}
+	return types
+}
+
+func eventTypeStrings(events []agent.Event) []string {
+	types := make([]string, len(events))
+	for i, event := range events {
+		types[i] = string(event.Type)
 	}
 	return types
 }

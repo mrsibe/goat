@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/mrsibe/goat/agent"
+	"github.com/mrsibe/goat/ai"
 	"github.com/mrsibe/goat/ai/openai"
 )
 
@@ -66,7 +67,13 @@ func run() error {
 		case agent.EventToolStart:
 			fmt.Printf("\nAction: %s(%s)\n", event.ToolCall.Name, event.ToolCall.Arguments)
 		case agent.EventToolEnd:
-			fmt.Printf("Observation: %s\n", event.ToolResult.Content)
+			fmt.Print("Observation: ")
+			for _, block := range event.ToolResult.Content {
+				if block.Type == ai.BlockText {
+					fmt.Print(block.Text)
+				}
+			}
+			fmt.Println()
 		}
 	}))
 	if err != nil {

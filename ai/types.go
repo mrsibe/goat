@@ -1,5 +1,5 @@
-// Package ai defines the provider-neutral message, tool, and streaming types used
-// by the agent runtime.
+// Package ai defines the provider-neutral message, tool, request, and streaming
+// contracts used by the agent runtime.
 package ai
 
 import (
@@ -22,21 +22,36 @@ type BlockType string
 
 const (
 	BlockText     BlockType = "text"
+	BlockThinking BlockType = "thinking"
+	BlockImage    BlockType = "image"
 	BlockToolCall BlockType = "tool_call"
 )
 
+// ImageContent is an inline image or image URL.
+type ImageContent struct {
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
+}
+
 // ToolCall is a completed tool invocation requested by the model.
 type ToolCall struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Arguments      json.RawMessage `json:"arguments"`
+	ArgumentsError string          `json:"arguments_error,omitempty"`
 }
 
 // ContentBlock is one piece of provider-neutral message content.
 type ContentBlock struct {
-	Type     BlockType `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ToolCall *ToolCall `json:"tool_call,omitempty"`
+	Type      BlockType     `json:"type"`
+	Text      string        `json:"text,omitempty"`
+	Thinking  string        `json:"thinking,omitempty"`
+	Signature string        `json:"signature,omitempty"`
+	ID        string        `json:"id,omitempty"`
+	Redacted  bool          `json:"redacted,omitempty"`
+	Image     *ImageContent `json:"image,omitempty"`
+	ToolCall  *ToolCall     `json:"tool_call,omitempty"`
 }
 
 // Message is a provider-neutral chat message. Assistant messages use tool-call
@@ -46,6 +61,8 @@ type Message struct {
 	Role       Role           `json:"role"`
 	Content    []ContentBlock `json:"content"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+	ToolName   string         `json:"tool_name,omitempty"`
+	IsError    bool           `json:"is_error,omitempty"`
 }
 
 // TextMessage creates a message containing one text block.
@@ -56,24 +73,44 @@ func TextMessage(role Role, text string) Message {
 	}
 }
 
-// ToolMessage creates a tool-result message correlated with a tool call.
-func ToolMessage(callID, text string) Message {
+// ToolMessage creates a successful text tool-result message.
+func ToolMessage(callID, toolName, text string) Message {
+	return ToolTextMessage(callID, toolName, text, false)
+}
+
+// ToolTextMessage creates a tool-result message containing one text block.
+func ToolTextMessage(callID, toolName, text string, isError bool) Message {
+	return ToolResultMessage(
+		callID,
+		toolName,
+		[]ContentBlock{{Type: BlockText, Text: text}},
+		isError,
+	)
+}
+
+// ToolResultMessage creates a tool-result message with arbitrary content blocks.
+func ToolResultMessage(callID, toolName string, content []ContentBlock, isError bool) Message {
 	return Message{
 		Role:       RoleTool,
-		Content:    []ContentBlock{{Type: BlockText, Text: text}},
+		Content:    CloneContentBlocks(content),
 		ToolCallID: callID,
+		ToolName:   toolName,
+		IsError:    isError,
 	}
 }
 
 // Text returns all text blocks in the message joined without separators.
 func (m Message) Text() string {
-	var text strings.Builder
-	for _, block := range m.Content {
-		if block.Type == BlockText {
-			text.WriteString(block.Text)
-		}
-	}
-	return text.String()
+	return joinBlocks(m.Content, BlockText, func(block ContentBlock) string {
+		return block.Text
+	})
+}
+
+// Thinking returns all thinking blocks joined without separators.
+func (m Message) Thinking() string {
+	return joinBlocks(m.Content, BlockThinking, func(block ContentBlock) string {
+		return block.Thinking
+	})
 }
 
 // ToolCalls returns all tool-call blocks in source order.
@@ -87,6 +124,16 @@ func (m Message) ToolCalls() []ToolCall {
 	return calls
 }
 
+func joinBlocks(blocks []ContentBlock, blockType BlockType, value func(ContentBlock) string) string {
+	var text strings.Builder
+	for _, block := range blocks {
+		if block.Type == blockType {
+			text.WriteString(value(block))
+		}
+	}
+	return text.String()
+}
+
 // ToolSpec describes a tool to the model.
 type ToolSpec struct {
 	Name        string         `json:"name"`
@@ -98,6 +145,9 @@ type ToolSpec struct {
 type Usage struct {
 	PromptTokens     int64 `json:"prompt_tokens"`
 	CompletionTokens int64 `json:"completion_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"`
 	TotalTokens      int64 `json:"total_tokens"`
 }
 
@@ -105,6 +155,9 @@ type Usage struct {
 func (u *Usage) Add(other Usage) {
 	u.PromptTokens += other.PromptTokens
 	u.CompletionTokens += other.CompletionTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CacheWriteTokens += other.CacheWriteTokens
+	u.ReasoningTokens += other.ReasoningTokens
 	u.TotalTokens += other.TotalTokens
 }
 
@@ -125,20 +178,35 @@ func CloneToolCall(call ToolCall) ToolCall {
 	return call
 }
 
+// CloneContentBlock deep-copies a content block.
+func CloneContentBlock(block ContentBlock) ContentBlock {
+	if block.ToolCall != nil {
+		call := CloneToolCall(*block.ToolCall)
+		block.ToolCall = &call
+	}
+	if block.Image != nil {
+		image := *block.Image
+		block.Image = &image
+	}
+	return block
+}
+
+// CloneContentBlocks deep-copies content blocks.
+func CloneContentBlocks(blocks []ContentBlock) []ContentBlock {
+	if blocks == nil {
+		return nil
+	}
+	cloned := make([]ContentBlock, len(blocks))
+	for i, block := range blocks {
+		cloned[i] = CloneContentBlock(block)
+	}
+	return cloned
+}
+
 // CloneMessage deep-copies a message.
 func CloneMessage(message Message) Message {
 	cloned := message
-	if message.Content == nil {
-		return cloned
-	}
-	cloned.Content = make([]ContentBlock, len(message.Content))
-	for i, block := range message.Content {
-		cloned.Content[i] = block
-		if block.ToolCall != nil {
-			call := CloneToolCall(*block.ToolCall)
-			cloned.Content[i].ToolCall = &call
-		}
-	}
+	cloned.Content = CloneContentBlocks(message.Content)
 	return cloned
 }
 

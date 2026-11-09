@@ -18,8 +18,9 @@ type Turn struct {
 
 // Model returns pre-scripted turns and records requests.
 type Model struct {
-	Turns    []Turn
-	Requests []ai.Request
+	ModelInfo ai.ModelInfo
+	Turns     []Turn
+	Requests  []ai.Request
 }
 
 // New creates a scripted model.
@@ -27,9 +28,25 @@ func New(turns ...Turn) *Model {
 	return &Model{Turns: turns}
 }
 
+// Info implements ai.Model.
+func (m *Model) Info() ai.ModelInfo {
+	if m == nil {
+		return ai.ModelInfo{}
+	}
+	if m.ModelInfo.Provider == "" {
+		return ai.ModelInfo{
+			Provider:      "faux",
+			Model:         "scripted",
+			API:           "faux",
+			SupportsTools: true,
+		}
+	}
+	return m.ModelInfo
+}
+
 // Stream implements ai.Model.
 func (m *Model) Stream(_ context.Context, request ai.Request) (ai.Stream, error) {
-	m.Requests = append(m.Requests, request)
+	m.Requests = append(m.Requests, aiRequestClone(request))
 	if len(m.Turns) == 0 {
 		return nil, errors.New("faux: unexpected model call")
 	}
@@ -39,6 +56,12 @@ func (m *Model) Stream(_ context.Context, request ai.Request) (ai.Stream, error)
 		return nil, turn.StartErr
 	}
 	return &stream{turn: turn}, nil
+}
+
+func aiRequestClone(request ai.Request) ai.Request {
+	request.Messages = ai.CloneMessages(request.Messages)
+	request.Tools = append([]ai.ToolSpec(nil), request.Tools...)
+	return request
 }
 
 type stream struct {

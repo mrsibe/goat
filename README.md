@@ -1,31 +1,37 @@
 # GOAT
 
-**GOAT = Go Agent Toolkit**，一个参考 [pi](https://github.com/earendil-works/pi)
-分层思路实现的 Go Agent SDK，并在其上组装了名为 `goding` 的无 TUI 编码 Agent。
+**GOAT = Go Agent Toolkit**，一个供应商无关的 Go Agent SDK。它把模型协议、
+消息模型和 Agent 循环拆成可组合的包，方便你在上面构建自己的 coding agent、
+工作流 agent 或其他工具型 Agent。
 
 仓库：<https://github.com/mrsibe/goat>
 
-这不是 pi 的等价移植。这里保留了可复用的边界，刻意去掉了大规模产品功能：
+> 当前目标版本是 v0.2.0。v0.x 阶段允许破坏性 API，升级前请阅读
+> [CHANGELOG.md](CHANGELOG.md) 的迁移说明。
 
-- `ai`：供应商无关的消息、工具声明、流事件和 usage。
-- `agent`：通用模型循环、工具执行、生命周期事件和会话历史。
-- `coding`：编码系统提示词、根 `AGENTS.md`、`read/write/edit/bash` 工具。
-- `codingagent`：把模型、工具和提示词组装成 goding，并提供 JSONL 会话。
-- `cmd/goding`：headless CLI。
+## 定位
 
-项目仍然是一个 Go module，包之间通过公开接口组合，没有拆成多个 module。
+GOAT 只负责 Agent SDK 的核心边界：
 
-## 安全模型
+- `ai`：供应商无关的消息、内容块、工具声明、请求参数、流事件和 usage。
+- `ai/openai`：OpenAI Chat Completions 与 Responses 适配器，使用官方
+  `openai-go` SDK。
+- `ai/anthropic`：Anthropic Messages 适配器，使用官方
+  `anthropic-sdk-go`。
+- `agent`：模型循环、工具执行、生命周期事件、会话历史和请求变换。
+- `ai/faux`：可脚本化的测试模型，不依赖网络。
 
-`goding` **不会询问写文件或执行命令的审批**。
+编码 Agent、文件工具、shell 工具、会话持久化和 CLI 已经迁移到独立仓库
+[`github.com/mrsibe/goding`](https://github.com/mrsibe/goding)。GOAT 主仓
+不再内置任何具体 Agent 产品。
 
-- `read/write/edit` 被限制在当前工作区内，并检查路径穿越和 symlink 逃逸。
-- `bash` **不受工作区限制**，可以访问工作区外路径，也会继承当前用户权限。
-- 文件工具限制不是操作系统沙箱，也无法防御 TOCTOU 或恶意本地进程。
+## 安装
 
-需要更强隔离时，请在容器、虚拟机或独立用户中运行。
+```bash
+go get github.com/mrsibe/goat@v0.2.0
+```
 
-## SDK 快速开始
+## 快速开始
 
 ```go
 package main
@@ -33,16 +39,17 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/mrsibe/goat/agent"
+	"github.com/mrsibe/goat/ai"
 	"github.com/mrsibe/goat/ai/openai"
 )
 
 func main() {
-	model, err := openai.New(openai.Config{
-		APIKey:  "YOUR_API_KEY",
-		BaseURL: "https://api.deepseek.com",
-		Model:   "deepseek-chat",
+	model, err := openai.NewResponses(openai.Config{
+		APIKey: os.Getenv("OPENAI_API_KEY"),
+		Model:  "gpt-5",
 	})
 	if err != nil {
 		panic(err)
@@ -64,161 +71,343 @@ func main() {
 }
 ```
 
-`ai/openai` 使用 Chat Completions 流式协议，可连接 OpenAI、DeepSeek、OpenRouter、
-Ollama 等兼容服务。API key 可以为空，方便本地无鉴权服务。
-
-## 自定义工具
+需要工具时，用 `agent.NewTextTool` 或 `agent.NewTool` 注册：
 
 ```go
-echo := agent.NewTool(ai.ToolSpec{
-	Name:        "echo",
-	Description: "返回输入文本",
+weather := agent.NewTextTool(ai.ToolSpec{
+	Name:        "get_weather",
+	Description: "查询城市天气",
 	Parameters: map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"text": map[string]any{"type": "string"},
+			"city": map[string]any{"type": "string"},
 		},
-		"required": []string{"text"},
+		"required": []string{"city"},
 	},
-}, func(_ context.Context, call ai.ToolCall) (string, error) {
+}, func(ctx context.Context, call ai.ToolCall) (string, error) {
 	var input struct {
-		Text string `json:"text"`
+		City string `json:"city"`
 	}
 	if err := json.Unmarshal(call.Arguments, &input); err != nil {
 		return "", err
 	}
-	return input.Text, nil
+	return "晴，25°C", nil
+})
+
+assistant, err := agent.New(agent.Config{
+	Model: model,
+	Tools: []agent.Tool{weather},
 })
 ```
 
-工具返回的错误、未知工具和 panic 会作为错误 observation 交回模型。模型调用失败、
-上下文取消、输出长度上限或 `MaxSteps` 耗尽会终止当前 run。
+`json.Unmarshal` 的错误不需要转换成特殊结果：Agent 会把工具返回的错误、
+panic、未知工具、参数校验失败和非法工具结果统一转换为错误 observation 交回
+模型。
 
-`agent.Config` 还提供 `BeforeToolCall` 和 `AfterToolCall`，可在 SDK 使用方实现策略、
-审计或结果改写；goding 默认策略是完全放开。
+## 模型协议
 
-## 事件与流
+三种适配器实现同一个 `ai.Model` 接口，可以按 run 或按业务替换：
 
-模型层 `ai.Stream` 返回 `start`、`text_delta`、`tool_call_delta`、`usage`、`done`。
-Agent 层把这些事件和工具生命周期组合成：
+```go
+completions, _ := openai.NewCompletions(openai.Config{
+	APIKey:  "YOUR_API_KEY",
+	BaseURL: "https://api.deepseek.com",
+	Model:   "deepseek-chat",
+})
+
+responses, _ := openai.NewResponses(openai.Config{
+	APIKey: "YOUR_API_KEY",
+	Model:  "gpt-5",
+})
+
+messages, _ := anthropic.New(anthropic.Config{
+	APIKey: "YOUR_API_KEY",
+	Model:  "claude-sonnet-5-5",
+})
+```
+
+能力矩阵：
+
+| 能力 | Chat Completions | Responses | Anthropic Messages |
+| --- | --- | --- | --- |
+| 文本流 | 支持 | 支持 | 支持 |
+| 工具调用与工具结果 | 支持 | 支持 | 支持 |
+| 用户图片输入 | 支持 | 支持 | 支持 |
+| 工具结果图片 | 不支持 | 支持 | 支持 |
+| thinking / 推理内容 | 不支持 | summary + encrypted content | thinking + signature / redacted |
+| `tool_choice` | 支持 | 支持 | 支持 |
+| `top_p` | 支持 | 支持 | 支持 |
+| `reasoning_effort` | 支持 | 支持 | 不适用 |
+| `thinking_budget_tokens` | 不适用 | 不适用 | 支持 |
+| 缓存命中 usage | 支持 | 支持 | 支持 |
+| 请求级缓存键 | `prompt_cache_key` | `prompt_cache_key` | 不适用 |
+
+`Provider`、`ContextWindow`、`MaxOutputTokens` 是元数据，不会改变协议路由。
+Anthropic 的 `max_tokens` 未指定时默认 4096，可由
+`Config.MaxOutputTokens` 或 `RequestOptions.MaxTokens` 覆盖。OpenAI Chat
+Completions 适用于 OpenAI、DeepSeek、OpenRouter、Ollama 等兼容服务；
+`APIKey` 可以为空以连接本地无鉴权服务。
+
+`ModelInfo` 的 `SupportsImages`、`SupportsToolResultImages`、
+`SupportsThinking` 表示适配器协议能力。具体模型是否支持对应能力仍由模型本身
+决定。
+
+## 消息与内容
+
+`ai.Message` 由角色和内容块组成。角色包括 `system`、`user`、`assistant`、
+`tool`；内容块包括：
+
+- `BlockText`：普通文本。
+- `BlockThinking`：推理内容，带 `Signature`、`ID` 和 `Redacted` 元数据。
+- `BlockImage`：`ImageContent`，支持 base64 `Data + MediaType` 或 `URL`。
+- `BlockToolCall`：模型请求的工具调用。
+
+工具结果使用 `ai.ToolResultMessage` 或 `ai.ToolTextMessage`。工具结果可以包含
+多个文本和图片块，并通过 `IsError` 保留结构化错误状态：
+
+```go
+ai.ToolResultMessage("call_1", "screenshot", []ai.ContentBlock{
+	{Type: ai.BlockText, Text: "页面预览"},
+	{Type: ai.BlockImage, Image: &ai.ImageContent{
+		Data:      base64PNG,
+		MediaType: "image/png",
+	}},
+}, false)
+```
+
+辅助方法：
+
+- `ai.TextMessage(role, text)`
+- `ai.ToolMessage(callID, toolName, text)`
+- `ai.ToolTextMessage(callID, toolName, text, isError)`
+- `ai.ToolResultMessage(callID, toolName, content, isError)`
+- `Message.Text()` / `Message.Thinking()` / `Message.ToolCalls()`
+- `CloneMessage` / `CloneMessages` / `CloneContentBlocks`
+
+消息、工具调用和结果在 Agent 会话中会被深拷贝，调用方修改返回值不会污染内部
+历史。
+
+### Thinking 与图片
+
+Anthropic thinking 的 `signature`、redacted payload，以及 OpenAI Responses
+reasoning item 的 encrypted content 都会保留在历史中，并在下一轮请求时回传。
+不要把 thinking 块当作普通文本拼接，否则会丢失签名。
+
+图片块要么设置 base64 `Data`，要么设置 `URL`，不能同时设置；base64 图片必须
+提供 `MediaType`。如果不确定目标模型是否接受图片工具结果，先检查
+`model.Info().SupportsToolResultImages`。
+
+## Agent 运行时
+
+```go
+assistant, err := agent.New(agent.Config{
+	Model:             model,
+	Tools:             tools,
+	SystemPrompt:      "You are a helpful assistant.",
+	MaxSteps:          10,
+	RequestOptions:    ai.RequestOptions{MaxTokens: 2048},
+	ToolExecution:     agent.ToolExecutionParallel,
+	TransformMessages: transform,
+	BeforeToolCall:    beforeTool,
+	AfterToolCall:     afterTool,
+})
+```
+
+主要字段：
+
+- `MaxSteps`：最多模型轮数，默认 10。耗尽返回 `agent.ErrMaxSteps`。
+- `RequestOptions`：每次模型请求的默认采样、路由和 thinking 参数。
+- `ToolExecution`：`ToolExecutionSequential`（默认）或
+  `ToolExecutionParallel`。
+- `TransformMessages`：每次请求前改写消息列表，适合裁剪历史、注入上下文或
+  做自定义压缩。
+- `BeforeToolCall`：工具执行前策略钩子。返回错误会阻止执行，并把错误文本作为
+  错误 observation 交给模型。
+- `AfterToolCall`：工具执行后改写观察结果。
+
+`Agent` 是不可变的，可被多个 `Session` 并发使用。单个 `Session` 不应并发调用
+`Run`。`Session.Messages()` 返回深拷贝；`NewSessionWithHistory` 会忽略历史中
+的系统消息，并使用 Agent 当前配置的 system prompt。
+
+### 并行工具
+
+并行模式下，所有工具调用先按模型顺序完成参数校验和 `BeforeToolCall` 预检，
+再并发执行；最终结果仍按模型给出的调用顺序写入历史。因此：
+
+- 工具实现必须支持并发调用并且线程安全。
+- 事件中的 `tool_start` 顺序是模型顺序，`tool_end` 顺序是完成顺序。
+- 结果消息顺序始终与 assistant 消息中的 tool call 顺序一致。
+
+### 请求级覆盖
+
+`Run` 可以临时覆盖 Agent 默认请求参数，未设置字段保留默认值：
+
+```go
+temperature := 0.2
+topP := 0.9
+result, err := assistant.Run(ctx, "解释这个错误", agent.WithRequestOptions(
+	ai.RequestOptions{
+		Temperature:          &temperature,
+		TopP:                 &topP,
+		MaxTokens:            4096,
+		ReasoningEffort:      "medium",
+		ThinkingBudgetTokens: 2048,
+		ToolChoice:           ai.ToolChoice{Mode: ai.ToolChoiceAuto},
+	},
+))
+```
+
+`ToolChoice.Mode` 为空表示使用供应商默认值；`ToolChoiceNamed` 需要同时设置
+`Name`。不同协议会忽略不适用于自己的字段。
+
+### 消息变换
+
+`TransformMessages` 每次模型调用前调用一次，收到的是历史的深拷贝。它返回的
+消息只用于本次请求，不会写回 Session：
+
+```go
+assistant, _ := agent.New(agent.Config{
+	Model: model,
+	TransformMessages: func(ctx context.Context, messages []ai.Message) ([]ai.Message, error) {
+		if len(messages) <= 20 {
+			return messages, nil
+		}
+		return append([]ai.Message{messages[0]}, messages[len(messages)-18:]...), nil
+	},
+})
+```
+
+SDK 不内置历史压缩。压缩策略、摘要调用和 token 预算由使用方决定。
+
+## 事件
+
+`Run` 的 `agent.WithOnEvent` 回调同步执行。事件类型：
 
 ```text
 agent_start
-turn_start
-message_start / message_delta / message_end
-tool_start / tool_end
-turn_end
+  turn_start
+    message_start / message_delta / message_end
+    thinking_start / thinking_delta / thinking_end
+    tool_start / tool_end
+  turn_end
 agent_end
 agent_error
 ```
 
-事件回调同步执行；长时间阻塞的回调会阻塞当前 run。
+`Event.ToolResults` 在 `turn_end` 中一次给出本轮全部工具结果。`Event.Err` 是
+原始错误，`Event.Error` 是可序列化文本。事件回调阻塞会阻塞当前 run。
 
 ```go
-result, err := assistant.Run(ctx, "查一下天气", agent.WithOnEvent(func(event agent.Event) {
+result, err := assistant.Run(ctx, "查天气", agent.WithOnEvent(func(event agent.Event) {
 	switch event.Type {
 	case agent.EventMessageDelta:
 		fmt.Print(event.Text)
+	case agent.EventThinkingDelta:
+		log.Print(event.Thinking)
 	case agent.EventToolStart:
-		fmt.Printf("\n调用 %s\n", event.ToolCall.Name)
+		fmt.Printf("\ncall %s(%s)\n", event.ToolCall.Name, event.ToolCall.Arguments)
 	case agent.EventToolEnd:
-		fmt.Printf("结果：%s\n", event.ToolResult.Content)
+		fmt.Printf("result: %s\n", event.ToolResult.Text())
 	}
 }))
 ```
 
-## 使用 goding
+## 工具
 
-```bash
-go install github.com/mrsibe/goat/cmd/goding@latest
+工具实现 `agent.Tool`：
 
-# 或在仓库内构建
-go build -o ./bin/goding ./cmd/goding
-
-export OPENAI_API_KEY=...
-export OPENAI_MODEL=deepseek-chat
-export OPENAI_BASE_URL=https://api.deepseek.com
-
-./bin/goding "解释一下这个仓库的目录结构"
-printf '检查并修复测试失败\n' | ./bin/goding
+```go
+type Tool interface {
+	Spec() ai.ToolSpec
+	Execute(ctx context.Context, call ai.ToolCall) (ToolResult, error)
+}
 ```
 
-主要参数：
+函数适配器：
 
-```text
--m, --model string
--b, --base-url string
--k, --api-key string
--c, --continue
--r, --resume string
-    --session-dir string
-    --no-session
-    --json
-    --max-steps int
-    --version
-    --help
+- `agent.NewTextTool(spec, fn)`：函数返回文本。
+- `agent.NewTool(spec, fn)`：函数返回 `agent.ToolResult`，可包含文本和图片。
+- `agent.TextResult(text)` / `agent.ErrorResult(text)`：常用结果构造器。
+- `agent.ToolResult.Text()`：拼接结果中的文本块。
+
+执行语义：
+
+- 工具错误和 panic 会变成 `IsError=true` 的 observation。
+- 未知工具、参数校验失败、`BeforeToolCall` 拒绝和非法结果也会变成错误
+  observation。
+- 模型输出因 token 上限被截断时，不会执行任何工具调用；Agent 会为每个调用
+  写入一条错误 observation，并在下一轮要求模型重新发起完整调用。
+- `stop_reason=error`、流错误和上下文取消会终止 run，但保留已经产生的
+  assistant partial 消息和 usage。
+
+工具参数会在执行前按 `ToolSpec.Parameters` 校验。校验器覆盖对象、
+`required`、常见 JSON 类型、数组、枚举、数值和字符串限制、
+`additionalProperties`、本地 `$ref` 以及 `allOf/anyOf/oneOf/not`；其他供应商
+专属 Schema 关键字由工具自身负责。
+
+## 测试
+
+`ai/faux` 提供脚本化模型，适合在不访问网络的情况下测试 Agent、工具循环和事件：
+
+```go
+model := faux.New(
+	faux.Turn{Events: []ai.Event{
+		{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{
+			ID: "call_1", Name: "echo", ArgumentsDelta: `{"text":"hi"}`,
+		}},
+		{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
+	}},
+	faux.Turn{Events: []ai.Event{
+		{Type: ai.EventTextDelta, TextDelta: "done"},
+		{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+	}},
+)
 ```
 
-环境变量为 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` 和 `GODING_HOME`。
-消息来自位置参数；没有位置参数且 stdin 是管道时，读取整个 stdin。没有消息且 stdin
-是终端时打印帮助。
+`faux.Model.Requests` 记录每次请求，包含消息、工具和 `RequestOptions`。
 
-文本模式只在 stdout 输出最终 assistant 文本。`--json` 每行输出一个 JSON 对象，
-第一个事件是 `session_start`，随后是 agent 事件；错误事件为 `agent_error`。
+## v0.1 迁移
 
-退出码：
+v0.2.0 的主要破坏性变化：
 
-- `0`：成功。
-- `1`：模型、agent、输出长度或 max-steps 错误。
-- `2`：参数、配置、模型初始化或会话加载错误。
-- `130`：被 SIGINT/SIGTERM 中断。
+1. `ai.Model` 新增 `Info() ai.ModelInfo`。自定义模型需要实现 `Info`。
+2. `ai.Request` 新增 `Options ai.RequestOptions`，支持采样、tool choice、
+   reasoning 和 thinking 参数。
+3. 流事件分拆为 `EventTextStart/Delta/End`、
+   `EventThinkingStart/Delta/End`、
+   `EventToolCallStart/Delta/End`、`EventUsage`、`EventDone`、`EventError`。
+   `ToolCallDelta` 不再放在 `Event.ToolCall`，而是
+   `Event.ToolCallDelta`，块位置使用 `Event.ContentIndex`。
+4. `ai.ToolMessage` 从 `(callID, text)` 变为
+   `(callID, toolName, text)`；推荐使用 `ai.ToolTextMessage`。
+5. `agent.ToolFunc` 返回 `agent.ToolResult`，不再是 `string`；旧的文本工具
+   改用 `agent.NewTextTool`。
+6. `agent.ToolResult` 的 `CallID` 字段删除，`Content` 从 `string` 变为
+   `[]ai.ContentBlock`；使用 `agent.TextResult`、`agent.ErrorResult` 或
+   `ToolResult.Text()` 迁移。
+7. `internal/faux` 移到公开包 `ai/faux`。
+8. `coding`、`codingagent` 和 `cmd/goding` 从 SDK 主仓删除，迁移到
+   `github.com/mrsibe/goding`。
 
-## 会话持久化
+## 边界
 
-默认位置：
+GOAT SDK 不包含：
 
-```text
-$GODING_HOME/sessions/<workspace-sha256-16>/<session-id>.jsonl
-```
+- 会话持久化和恢复。
+- 自动历史压缩、摘要和 token 预算管理。
+- MCP、skills、子 Agent、RPC 或 TUI。
+- OAuth、模型目录、路由和模型能力数据库。
+- 编码工具、文件/命令沙箱和审批策略。
 
-`GODING_HOME` 默认 `~/.goding`。`--session-dir` 替换 `sessions` 根目录，仍然按工作区
-哈希隔离。`--continue` 恢复当前工作区最近修改的会话，`--resume <id>` 恢复指定会话；
-两者不能和 `--no-session` 同时使用。
+这些属于具体 Agent 产品能力，应在 SDK 之上实现。`TransformMessages`、
+`BeforeToolCall`、`AfterToolCall` 和自定义 `ai.Model` 是预留的扩展点。
 
-JSONL 是线性追加格式，版本为 1：
-
-```json
-{"type":"session","version":1,"id":"...","timestamp":"...","cwd":"..."}
-{"type":"message","timestamp":"...","message":{"role":"user","content":[...]}}
-{"type":"message","timestamp":"...","message":{"role":"assistant","content":[...]}}
-{"type":"usage","timestamp":"...","usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}
-```
-
-系统提示词不持久化，恢复时根据当前工作区和根 `AGENTS.md` 重新生成。没有换行结尾的
-残缺末行会被忽略；内部损坏会明确报错，避免静默丢失上下文。v1 不支持分支、压缩、
-多进程锁或会话迁移。
-
-## 编码工具
-
-- `read`：`path/offset/limit`，最多返回 2000 行或 50KB，附带续读 offset。
-- `write`：创建或覆盖文件，自动创建父目录。
-- `edit`：对原始文件做唯一、非重叠的精确文本替换；保留 BOM 和 LF/CRLF，拒绝混合换行。
-- `bash`：`bash -lc`，合并 stdout/stderr，保留最后 2000 行或 50KB；截断时保留完整输出临时文件。
-
-编码 Agent 自动读取工作区根目录的 `AGENTS.md`，不扫描父目录或子目录。内置工具输出会
-受上述限制，第三方自定义工具需要自行控制结果大小；v1 不做自动历史压缩。
-
-## 当前边界
-
-v1 不包含 TUI、MCP、扩展系统、skills、子代理、RPC、并行工具执行、审批机制、
-图片/thinking 内容、原生 Anthropic 适配器或自动会话压缩。工具执行的顺序与模型给出的
-工具调用顺序一致。
-
-## 验证
+## 开发
 
 ```bash
 gofmt -w .
 GOCACHE=/tmp/goat-gocache GOFLAGS=-buildvcs=false go test ./...
+GOCACHE=/tmp/goat-gocache GOFLAGS=-buildvcs=false go test -race ./...
 GOCACHE=/tmp/goat-gocache GOFLAGS=-buildvcs=false go vet ./...
 GOCACHE=/tmp/goat-gocache GOFLAGS=-buildvcs=false go build ./...
 ```

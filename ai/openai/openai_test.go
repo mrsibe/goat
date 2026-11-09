@@ -81,6 +81,21 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 	writeChunk(&responseBody, map[string]any{
 		"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": "test-model",
 		"choices": []any{map[string]any{
+			"index": 0,
+			"delta": map[string]any{
+				"tool_calls": []any{map[string]any{
+					"index": 0,
+					"function": map[string]any{
+						"arguments": `"北京"}`,
+					},
+				}},
+			},
+			"finish_reason": nil,
+		}},
+	})
+	writeChunk(&responseBody, map[string]any{
+		"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": "test-model",
+		"choices": []any{map[string]any{
 			"index":         0,
 			"delta":         map[string]any{},
 			"finish_reason": "tool_calls",
@@ -134,7 +149,7 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 			ai.TextMessage(ai.RoleSystem, "sys"),
 			ai.TextMessage(ai.RoleUser, "hi"),
 			assistant,
-			ai.ToolMessage("call_1", "sunny"),
+			ai.ToolMessage("call_1", "get_weather", "sunny"),
 		},
 		Tools: []ai.ToolSpec{{
 			Name:        "get_weather",
@@ -165,9 +180,14 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 	}
 	wantTypes := []ai.EventType{
 		ai.EventStart,
+		ai.EventTextStart,
 		ai.EventTextDelta,
+		ai.EventToolCallStart,
+		ai.EventToolCallDelta,
 		ai.EventToolCallDelta,
 		ai.EventUsage,
+		ai.EventTextEnd,
+		ai.EventToolCallEnd,
 		ai.EventDone,
 	}
 	gotTypes := make([]ai.EventType, len(events))
@@ -177,18 +197,27 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 	if !reflect.DeepEqual(gotTypes, wantTypes) {
 		t.Fatalf("event types = %v, want %v", gotTypes, wantTypes)
 	}
-	if events[1].TextDelta != "你好" {
-		t.Fatalf("text delta = %q", events[1].TextDelta)
+	if events[2].TextDelta != "你好" {
+		t.Fatalf("text delta = %q", events[2].TextDelta)
 	}
-	if events[2].ToolCall == nil || events[2].ToolCall.ID != "call_1" ||
-		events[2].ToolCall.Name != "get_weather" || events[2].ToolCall.ArgumentsDelta != `{"city":` {
-		t.Fatalf("unexpected tool delta: %+v", events[2].ToolCall)
+	if events[4].ToolCallDelta == nil || events[4].ToolCallDelta.ID != "call_1" ||
+		events[4].ToolCallDelta.Name != "get_weather" || events[4].ToolCallDelta.ArgumentsDelta != `{"city":` {
+		t.Fatalf("unexpected tool delta: %+v", events[4].ToolCallDelta)
 	}
-	if events[3].Usage == nil || events[3].Usage.TotalTokens != 13 {
-		t.Fatalf("usage = %+v", events[3].Usage)
+	if events[5].ToolCallDelta == nil || events[5].ToolCallDelta.ArgumentsDelta != `"北京"}` {
+		t.Fatalf("unexpected second tool delta: %+v", events[5].ToolCallDelta)
 	}
-	if events[4].StopReason != ai.StopReasonToolCalls {
-		t.Fatalf("stop reason = %q", events[4].StopReason)
+	if events[6].Usage == nil || events[6].Usage.TotalTokens != 13 {
+		t.Fatalf("usage = %+v", events[6].Usage)
+	}
+	if events[9].StopReason != ai.StopReasonToolCalls {
+		t.Fatalf("stop reason = %q", events[9].StopReason)
+	}
+	if events[9].Message == nil || len(events[9].Message.ToolCalls()) != 1 {
+		t.Fatalf("done message = %+v", events[9].Message)
+	}
+	if got := string(events[9].Message.ToolCalls()[0].Arguments); got != `{"city":"北京"}` {
+		t.Fatalf("tool call arguments = %q", got)
 	}
 
 	captured := <-requests
@@ -241,12 +270,131 @@ func TestProviderValidationAndConversionErrors(t *testing.T) {
 	}
 }
 
+func TestProvidersReportProtocolCapabilities(t *testing.T) {
+	completions, err := openai.NewCompletions(openai.Config{Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := completions.Info()
+	if !info.SupportsImages || info.SupportsToolResultImages || info.SupportsThinking {
+		t.Fatalf("completions info = %+v", info)
+	}
+
+	responses, err := openai.NewResponses(openai.Config{Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info = responses.Info()
+	if !info.SupportsImages || !info.SupportsToolResultImages || !info.SupportsThinking {
+		t.Fatalf("responses info = %+v", info)
+	}
+}
+
+func TestCompletionsMapsUserImages(t *testing.T) {
+	requests := make(chan capturedRequest, 1)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		requests <- capturedRequest{path: request.URL.Path, body: body}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+			Request:    request,
+		}, nil
+	})}
+
+	provider, err := openai.NewCompletions(openai.Config{
+		BaseURL:    "https://example.test",
+		Model:      "test-model",
+		HTTPClient: client,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := provider.Stream(context.Background(), ai.Request{
+		Messages: []ai.Message{{
+			Role: ai.RoleUser,
+			Content: []ai.ContentBlock{
+				{Type: ai.BlockText, Text: "look"},
+				{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MediaType: "image/png"}},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainStream(t, stream)
+
+	captured := <-requests
+	var body map[string]any
+	if err := json.Unmarshal(captured.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	message := messages[0].(map[string]any)
+	content := message["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content = %+v", content)
+	}
+	text := content[0].(map[string]any)
+	if text["type"] != "text" || text["text"] != "look" {
+		t.Fatalf("text part = %+v", text)
+	}
+	image := content[1].(map[string]any)
+	imageURL := image["image_url"].(map[string]any)
+	if image["type"] != "image_url" || imageURL["url"] != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("image part = %+v", image)
+	}
+}
+
+func TestCompletionsRejectsImageToolResults(t *testing.T) {
+	provider, err := openai.NewCompletions(openai.Config{Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.Stream(context.Background(), ai.Request{
+		Messages: []ai.Message{ai.ToolResultMessage(
+			"call_1",
+			"screenshot",
+			[]ai.ContentBlock{{
+				Type:  ai.BlockImage,
+				Image: &ai.ImageContent{Data: "aGVsbG8=", MediaType: "image/png"},
+			}},
+			false,
+		)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support image tool results") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func writeChunk(writer io.Writer, chunk map[string]any) {
 	data, err := json.Marshal(chunk)
 	if err != nil {
 		panic(err)
 	}
 	fmt.Fprintf(writer, "data: %s\n\n", data)
+}
+
+func drainStream(t *testing.T, stream ai.Stream) {
+	t.Helper()
+	defer stream.Close()
+	for {
+		event, err := stream.Next()
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == ai.EventError {
+			t.Fatalf("stream error event: %s", event.Error)
+		}
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
