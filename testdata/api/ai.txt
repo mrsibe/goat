@@ -1,0 +1,308 @@
+package ai // import "github.com/mrsibe/goat/ai"
+
+Package ai defines the provider-neutral message, tool, request, and streaming
+contracts used by the agent runtime.
+
+Stability: GOAT is pre-1.0 in v0.4 and may still make breaking changes. After
+v1.0, the exported API follows the policy in STABILITY.md at the repository
+root.
+
+FUNCTIONS
+
+func CloneRawMessage(raw json.RawMessage) json.RawMessage
+    CloneRawMessage deep-copies a JSON payload.
+
+func IsRetryable(err error) bool
+    IsRetryable reports whether an error represents a transient provider or
+    transport failure. APIError.Retryable is authoritative when set.
+
+func Retry(ctx context.Context, policy RetryPolicy, op func(context.Context) error) error
+    Retry runs op until it succeeds, returns a non-retryable error, or exhausts
+    the configured retry budget. Context cancellation interrupts backoff.
+
+func RetryDelay(policy RetryPolicy, attempt int) time.Duration
+    RetryDelay returns the delay before the given 1-indexed retry attempt.
+
+
+TYPES
+
+type API string
+    API identifies a provider protocol.
+
+const (
+	APIOpenAICompletions API = "openai-completions"
+	APIOpenAIResponses   API = "openai-responses"
+	APIAnthropicMessages API = "anthropic-messages"
+)
+type APIError struct {
+	Provider   string
+	StatusCode int
+	Code       string
+	Message    string
+	RequestID  string
+	Retryable  bool
+	Err        error
+}
+    APIError is the provider-neutral error returned by model adapters.
+
+func (e *APIError) Error() string
+
+func (e *APIError) Unwrap() error
+
+type BlockType string
+    BlockType identifies a content block within a message.
+
+const (
+	BlockText     BlockType = "text"
+	BlockThinking BlockType = "thinking"
+	BlockImage    BlockType = "image"
+	BlockToolCall BlockType = "tool_call"
+)
+type ContentBlock struct {
+	Type              BlockType     `json:"type"`
+	Text              string        `json:"text,omitempty"`
+	TextSignature     string        `json:"text_signature,omitempty"`
+	Thinking          string        `json:"thinking,omitempty"`
+	ThinkingSignature string        `json:"thinking_signature,omitempty"`
+	ID                string        `json:"id,omitempty"`
+	Redacted          bool          `json:"redacted,omitempty"`
+	Image             *ImageContent `json:"image,omitempty"`
+	ToolCall          *ToolCall     `json:"tool_call,omitempty"`
+}
+    ContentBlock is one piece of provider-neutral message content.
+
+func CloneContentBlock(block ContentBlock) ContentBlock
+    CloneContentBlock deep-copies a content block.
+
+func CloneContentBlocks(blocks []ContentBlock) []ContentBlock
+    CloneContentBlocks deep-copies content blocks.
+
+type Event struct {
+	Type          EventType      `json:"type"`
+	ContentIndex  int            `json:"content_index,omitempty"`
+	Text          string         `json:"text,omitempty"`
+	TextDelta     string         `json:"text_delta,omitempty"`
+	Thinking      string         `json:"thinking,omitempty"`
+	ThinkingDelta string         `json:"thinking_delta,omitempty"`
+	ToolCall      *ToolCall      `json:"tool_call,omitempty"`
+	ToolCallDelta *ToolCallDelta `json:"tool_call_delta,omitempty"`
+	Partial       *Message       `json:"partial,omitempty"`
+	Message       *Message       `json:"message,omitempty"`
+	Usage         *Usage         `json:"usage,omitempty"`
+	StopReason    StopReason     `json:"stop_reason,omitempty"`
+	Err           error          `json:"-"`
+	Error         string         `json:"error,omitempty"`
+}
+    Event is one normalized model stream event. Partial is a deep copy of the
+    assistant message accumulated so far. Done carries Message and Usage;
+    Error carries Err and the partial message.
+
+type EventType string
+    EventType identifies one normalized model stream event.
+
+const (
+	EventStart         EventType = "start"
+	EventTextStart     EventType = "text_start"
+	EventTextDelta     EventType = "text_delta"
+	EventTextEnd       EventType = "text_end"
+	EventThinkingStart EventType = "thinking_start"
+	EventThinkingDelta EventType = "thinking_delta"
+	EventThinkingEnd   EventType = "thinking_end"
+	EventToolCallStart EventType = "tool_call_start"
+	EventToolCallDelta EventType = "tool_call_delta"
+	EventToolCallEnd   EventType = "tool_call_end"
+	EventUsage         EventType = "usage"
+	EventDone          EventType = "done"
+	EventError         EventType = "error"
+)
+type ImageContent struct {
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
+}
+    ImageContent is an inline image or image URL.
+
+type Message struct {
+	Role              Role            `json:"role"`
+	Content           []ContentBlock  `json:"content"`
+	ToolCallID        string          `json:"tool_call_id,omitempty"`
+	ToolName          string          `json:"tool_name,omitempty"`
+	IsError           bool            `json:"is_error,omitempty"`
+	Timestamp         int64           `json:"timestamp,omitempty"`
+	Details           json.RawMessage `json:"details,omitempty"`
+	StructuredContent json.RawMessage `json:"structured_content,omitempty"`
+	Usage             *Usage          `json:"usage,omitempty"`
+	StopReason        StopReason      `json:"stop_reason,omitempty"`
+	Provider          string          `json:"provider,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	API               API             `json:"api,omitempty"`
+	ResponseModel     string          `json:"response_model,omitempty"`
+	ResponseID        string          `json:"response_id,omitempty"`
+	ErrorMessage      string          `json:"error_message,omitempty"`
+	DurationMs        int64           `json:"duration_ms,omitempty"`
+}
+    Message is a provider-neutral chat message. Assistant messages use tool-call
+    blocks for model-requested tools; tool messages use ToolCallID to correlate
+    the result with its request.
+
+func CloneMessage(message Message) Message
+    CloneMessage deep-copies a message.
+
+func CloneMessages(messages []Message) []Message
+    CloneMessages deep-copies a message slice.
+
+func TextMessage(role Role, text string) Message
+    TextMessage creates a message containing one text block.
+
+func ToolMessage(callID, toolName, text string) Message
+    ToolMessage creates a successful text tool-result message.
+
+func ToolResultMessage(callID, toolName string, content []ContentBlock, isError bool) Message
+    ToolResultMessage creates a tool-result message with arbitrary content
+    blocks.
+
+func ToolTextMessage(callID, toolName, text string, isError bool) Message
+    ToolTextMessage creates a tool-result message containing one text block.
+
+func (m Message) Text() string
+    Text returns all text blocks in the message joined without separators.
+
+func (m Message) Thinking() string
+    Thinking returns all thinking blocks joined without separators.
+
+func (m Message) ToolCalls() []ToolCall
+    ToolCalls returns all tool-call blocks in source order.
+
+type Model interface {
+	Info() ModelInfo
+	Stream(ctx context.Context, request Request) (Stream, error)
+}
+    Model is the boundary between the agent loop and a model provider.
+
+type ModelInfo struct {
+	Provider                 string `json:"provider"`
+	Model                    string `json:"model"`
+	API                      API    `json:"api"`
+	ContextWindow            int    `json:"context_window,omitempty"`
+	MaxOutputTokens          int    `json:"max_output_tokens,omitempty"`
+	SupportsTools            bool   `json:"supports_tools"`
+	SupportsImages           bool   `json:"supports_images,omitempty"`
+	SupportsToolResultImages bool   `json:"supports_tool_result_images,omitempty"`
+	SupportsThinking         bool   `json:"supports_thinking,omitempty"`
+}
+    ModelInfo describes a concrete model and the protocol capabilities exposed
+    by its adapter. Model-specific limitations still apply.
+
+type Request struct {
+	Messages []Message      `json:"messages"`
+	Tools    []ToolSpec     `json:"tools,omitempty"`
+	Options  RequestOptions `json:"options,omitempty"`
+}
+    Request is one provider-neutral model turn.
+
+type RequestOptions struct {
+	Temperature          *float64   `json:"temperature,omitempty"`
+	TopP                 *float64   `json:"top_p,omitempty"`
+	MaxTokens            int        `json:"max_tokens,omitempty"`
+	ToolChoice           ToolChoice `json:"tool_choice,omitempty"`
+	SessionID            string     `json:"session_id,omitempty"`
+	ReasoningEffort      string     `json:"reasoning_effort,omitempty"`
+	ThinkingBudgetTokens int        `json:"thinking_budget_tokens,omitempty"`
+}
+    RequestOptions contains per-request sampling and routing controls. Empty
+    values leave the provider default in place.
+
+type RetryPolicy struct {
+	Enabled    bool
+	MaxRetries int
+	BaseDelay  time.Duration
+	MaxDelay   time.Duration
+}
+    RetryPolicy controls bounded retries with exponential backoff. MaxRetries is
+    the number of retries after the initial call.
+
+type Role string
+    Role identifies the author of a message.
+
+const (
+	RoleSystem    Role = "system"
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
+)
+type StopReason string
+    StopReason describes why a model turn ended.
+
+const (
+	StopReasonStop      StopReason = "stop"
+	StopReasonLength    StopReason = "length"
+	StopReasonToolCalls StopReason = "tool_calls"
+	StopReasonError     StopReason = "error"
+	StopReasonAborted   StopReason = "aborted"
+)
+type Stream interface {
+	Next() (Event, error)
+	Close() error
+}
+    Stream yields normalized model events. Next returns io.EOF after the final
+    event. The caller always closes the stream.
+
+type ToolCall struct {
+	ID               string          `json:"id"`
+	ItemID           string          `json:"item_id,omitempty"`
+	Name             string          `json:"name"`
+	Arguments        json.RawMessage `json:"arguments"`
+	ArgumentsError   string          `json:"arguments_error,omitempty"`
+	ThoughtSignature string          `json:"thought_signature,omitempty"`
+	Namespace        string          `json:"namespace,omitempty"`
+}
+    ToolCall is a completed tool invocation requested by the model.
+
+func CloneToolCall(call ToolCall) ToolCall
+    CloneToolCall deep-copies a tool call.
+
+type ToolCallDelta struct {
+	ID             string `json:"id,omitempty"`
+	Name           string `json:"name,omitempty"`
+	ArgumentsDelta string `json:"arguments_delta,omitempty"`
+}
+    ToolCallDelta is one streamed fragment of a tool call. ContentIndex on the
+    enclosing Event identifies the content block. ID and Name are complete
+    values when present; ArgumentsDelta is incremental.
+
+type ToolChoice struct {
+	Mode ToolChoiceMode `json:"mode,omitempty"`
+	Name string         `json:"name,omitempty"`
+}
+    ToolChoice selects a tool-use policy. Name is used only with
+    ToolChoiceNamed.
+
+type ToolChoiceMode string
+    ToolChoiceMode controls how the model may use tools.
+
+const (
+	ToolChoiceAuto     ToolChoiceMode = "auto"
+	ToolChoiceNone     ToolChoiceMode = "none"
+	ToolChoiceRequired ToolChoiceMode = "required"
+	ToolChoiceNamed    ToolChoiceMode = "named"
+)
+type ToolSpec struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+}
+    ToolSpec describes a tool to the model.
+
+type Usage struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"`
+	TotalTokens      int64 `json:"total_tokens"`
+}
+    Usage contains token counts reported by a model provider.
+
+func (u *Usage) Add(other Usage)
+    Add accumulates another usage report.
+

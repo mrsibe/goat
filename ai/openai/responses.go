@@ -14,6 +14,7 @@ import (
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
+	"github.com/openai/openai-go/v3/shared/constant"
 )
 
 // ResponsesProvider implements ai.Model using the OpenAI Responses API.
@@ -183,6 +184,20 @@ func responsesAssistantInput(message ai.Message) ([]responses.ResponseInputItemU
 			if block.Text == "" {
 				continue
 			}
+			signatureID, signaturePhase := parseTextSignature(block.TextSignature)
+			if signatureID != "" {
+				text := responses.ResponseOutputTextParam{Text: block.Text}
+				item := responses.ResponseOutputMessageParam{
+					ID:      signatureID,
+					Content: []responses.ResponseOutputMessageContentUnionParam{{OfOutputText: &text}},
+					Status:  responses.ResponseOutputMessageStatusCompleted,
+					Role:    constant.Assistant("assistant"),
+					Type:    constant.Message("message"),
+					Phase:   responses.ResponseOutputMessagePhase(signaturePhase),
+				}
+				input = append(input, responses.ResponseInputItemUnionParam{OfOutputMessage: &item})
+				continue
+			}
 			input = append(input, responses.ResponseInputItemParamOfMessage(
 				block.Text,
 				responses.EasyInputMessageRoleAssistant,
@@ -198,8 +213,8 @@ func responsesAssistantInput(message ai.Message) ([]responses.ResponseInputItemU
 				})
 			}
 			item := responses.ResponseInputItemParamOfReasoning(block.ID, summary)
-			if block.Signature != "" {
-				item.OfReasoning.EncryptedContent = param.NewOpt(block.Signature)
+			if block.ThinkingSignature != "" {
+				item.OfReasoning.EncryptedContent = param.NewOpt(block.ThinkingSignature)
 			}
 			input = append(input, item)
 		case ai.BlockToolCall:
@@ -210,11 +225,15 @@ func responsesAssistantInput(message ai.Message) ([]responses.ResponseInputItemU
 			if strings.TrimSpace(arguments) == "" {
 				arguments = "{}"
 			}
-			input = append(input, responses.ResponseInputItemParamOfFunctionCall(
+			item := responses.ResponseInputItemParamOfFunctionCall(
 				arguments,
 				block.ToolCall.ID,
 				block.ToolCall.Name,
-			))
+			)
+			if block.ToolCall.ItemID != "" {
+				item.OfFunctionCall.ID = param.NewOpt(block.ToolCall.ItemID)
+			}
+			input = append(input, item)
 		case ai.BlockImage:
 			return nil, errors.New("openai: assistant image blocks are not supported")
 		default:
@@ -280,22 +299,24 @@ func responsesToolChoice(choice ai.ToolChoice) (responses.ResponseNewParamsToolC
 }
 
 type responsesStream struct {
-	raw        responsesEventStream
-	info       ai.ModelInfo
-	builder    *streaming.Builder
-	pending    []ai.Event
-	started    bool
-	done       bool
-	terminal   bool
-	textOrder  []string
-	textOpen   map[string]bool
-	toolOrder  []string
-	toolOpen   map[string]bool
-	thinkOrder []string
-	thinkOpen  map[string]bool
-	thinkSeen  map[string]bool
-	sawCall    bool
-	stopReason ai.StopReason
+	raw           responsesEventStream
+	info          ai.ModelInfo
+	builder       *streaming.Builder
+	pending       []ai.Event
+	started       bool
+	done          bool
+	terminal      bool
+	textOrder     []string
+	textOpen      map[string]bool
+	textItems     map[string]string
+	messagePhases map[string]string
+	toolOrder     []string
+	toolOpen      map[string]bool
+	thinkOrder    []string
+	thinkOpen     map[string]bool
+	thinkSeen     map[string]bool
+	sawCall       bool
+	stopReason    ai.StopReason
 }
 
 type responsesEventStream interface {
@@ -309,6 +330,8 @@ func (s *responsesStream) Next() (ai.Event, error) {
 	if !s.started {
 		s.started = true
 		s.textOpen = make(map[string]bool)
+		s.textItems = make(map[string]string)
+		s.messagePhases = make(map[string]string)
 		s.toolOpen = make(map[string]bool)
 		s.thinkOpen = make(map[string]bool)
 		s.thinkSeen = make(map[string]bool)
@@ -383,6 +406,8 @@ func (s *responsesStream) consume(event responses.ResponseStreamEventUnion) {
 		done := event.AsResponseOutputTextDone()
 		key := textKey(done.ItemID, done.OutputIndex, done.ContentIndex)
 		s.ensureText(key)
+		s.textItems[key] = done.ItemID
+		s.builder.SetTextMeta(key, encodeTextSignature(done.ItemID, s.messagePhases[done.ItemID]))
 		s.pending = append(s.pending, s.builder.TextEnd(key, done.Text))
 		delete(s.textOpen, key)
 	case "response.output_item.added":
@@ -393,10 +418,20 @@ func (s *responsesStream) consume(event responses.ResponseStreamEventUnion) {
 			s.builder.SetThinkingMeta(key, item.Item.ID, "", false)
 			return
 		}
+		if item.Item.Type == "message" {
+			message := item.Item.AsMessage()
+			id := message.ID
+			if id == "" {
+				id = item.Item.ID
+			}
+			s.messagePhases[id] = string(message.Phase)
+			return
+		}
 		if item.Item.Type == "function_call" {
 			call := item.Item.AsFunctionCall()
 			key := outputItemKey(item.Item.ID, item.OutputIndex)
 			s.sawCall = true
+			s.builder.SetToolItemID(key, item.Item.ID)
 			if s.toolOpen[key] {
 				s.builder.UpdateToolInfo(key, call.CallID, call.Name)
 				return
@@ -421,16 +456,30 @@ func (s *responsesStream) consume(event responses.ResponseStreamEventUnion) {
 			s.endThinking(key)
 			return
 		}
+		if item.Item.Type == "message" {
+			message := item.Item.AsMessage()
+			id := message.ID
+			if id == "" {
+				id = item.Item.ID
+			}
+			s.messagePhases[id] = string(message.Phase)
+			for key, itemID := range s.textItems {
+				if itemID == id {
+					s.builder.SetTextMeta(key, encodeTextSignature(id, string(message.Phase)))
+				}
+			}
+			return
+		}
 		if item.Item.Type != "function_call" {
 			return
 		}
 		call := item.Item.AsFunctionCall()
 		key := outputItemKey(item.Item.ID, item.OutputIndex)
-		if !s.toolOpen[key] {
-			return
-		}
+		s.ensureTool(key)
+		s.builder.SetToolItemID(key, item.Item.ID)
 		toolCall := ai.ToolCall{
 			ID:        call.CallID,
+			ItemID:    item.Item.ID,
 			Name:      call.Name,
 			Arguments: json.RawMessage(call.Arguments),
 		}
@@ -451,7 +500,8 @@ func (s *responsesStream) consume(event responses.ResponseStreamEventUnion) {
 		done := event.AsResponseFunctionCallArgumentsDone()
 		key := outputItemKey(done.ItemID, done.OutputIndex)
 		s.ensureTool(key)
-		toolCall := ai.ToolCall{Arguments: json.RawMessage(done.Arguments)}
+		s.builder.SetToolItemID(key, done.ItemID)
+		toolCall := ai.ToolCall{ItemID: done.ItemID, Arguments: json.RawMessage(done.Arguments)}
 		toolEvent, err := s.builder.ToolEnd(key, &toolCall)
 		if err != nil {
 			s.pending = append(s.pending, s.builder.Fail(err, ai.StopReasonError))
@@ -657,4 +707,31 @@ func outputItemKey(itemID string, outputIndex int64) string {
 		return "tool:" + itemID
 	}
 	return "tool:" + strconv.FormatInt(outputIndex, 10)
+}
+
+type responseTextSignature struct {
+	ID    string `json:"id"`
+	Phase string `json:"phase,omitempty"`
+}
+
+func encodeTextSignature(id, phase string) string {
+	if id == "" && phase == "" {
+		return ""
+	}
+	encoded, err := json.Marshal(responseTextSignature{ID: id, Phase: phase})
+	if err != nil {
+		return id
+	}
+	return string(encoded)
+}
+
+func parseTextSignature(signature string) (string, string) {
+	if signature == "" {
+		return "", ""
+	}
+	var parsed responseTextSignature
+	if err := json.Unmarshal([]byte(signature), &parsed); err == nil && parsed.ID != "" {
+		return parsed.ID, parsed.Phase
+	}
+	return signature, ""
 }

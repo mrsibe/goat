@@ -1,0 +1,33 @@
+package anthropic // import "github.com/mrsibe/goat/ai/anthropic"
+
+Package anthropic adapts the Anthropic Messages API to the ai model interface.
+It uses the official Anthropic Go SDK for requests and streaming.
+
+TYPES
+
+type Config struct {
+	APIKey          string
+	BaseURL         string
+	Model           string
+	Provider        string
+	HTTPClient      *http.Client
+	MaxRetries      *int
+	ContextWindow   int
+	MaxOutputTokens int
+}
+    Config configures an Anthropic Messages model.
+
+type Provider struct {
+	// Has unexported fields.
+}
+    Provider implements ai.Model using Anthropic Messages streaming.
+
+func New(config Config) (*Provider, error)
+    New creates an Anthropic Messages provider.
+
+func (p *Provider) Info() ai.ModelInfo
+    Info implements ai.Model.
+
+func (p *Provider) Stream(ctx context.Context, request ai.Request) (ai.Stream, error)
+    Stream starts one streamed Messages request.
+

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/mrsibe/goat/ai"
+	"github.com/mrsibe/goat/ai/internal/modeltest"
 	"github.com/mrsibe/goat/ai/openai"
 )
 
@@ -144,7 +145,7 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 			{Type: ai.BlockToolCall, ToolCall: &call},
 		},
 	}
-	stream, err := provider.Stream(context.Background(), ai.Request{
+	collected, err := modeltest.Collect(context.Background(), provider, ai.Request{
 		Messages: []ai.Message{
 			ai.TextMessage(ai.RoleSystem, "sys"),
 			ai.TextMessage(ai.RoleUser, "hi"),
@@ -165,19 +166,7 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stream.Close()
-
-	var events []ai.Event
-	for {
-		event, nextErr := stream.Next()
-		if errors.Is(nextErr, io.EOF) {
-			break
-		}
-		if nextErr != nil {
-			t.Fatal(nextErr)
-		}
-		events = append(events, event)
-	}
+	events := collected.Events
 	wantTypes := []ai.EventType{
 		ai.EventStart,
 		ai.EventTextStart,
@@ -190,13 +179,7 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 		ai.EventToolCallEnd,
 		ai.EventDone,
 	}
-	gotTypes := make([]ai.EventType, len(events))
-	for i, event := range events {
-		gotTypes[i] = event.Type
-	}
-	if !reflect.DeepEqual(gotTypes, wantTypes) {
-		t.Fatalf("event types = %v, want %v", gotTypes, wantTypes)
-	}
+	modeltest.AssertEventTypes(t, events, wantTypes)
 	if events[2].TextDelta != "你好" {
 		t.Fatalf("text delta = %q", events[2].TextDelta)
 	}

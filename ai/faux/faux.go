@@ -1,4 +1,7 @@
 // Package faux provides a deterministic scripted model for tests.
+//
+// Stability: this package is test-only and is not covered by the v1.0 public
+// API compatibility promise.
 package faux
 
 import (

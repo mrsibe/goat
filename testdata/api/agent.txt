@@ -1,0 +1,383 @@
+package agent // import "github.com/mrsibe/goat/agent"
+
+Package agent provides a provider-neutral, stateful tool-calling agent loop.
+
+Stability: GOAT is pre-1.0 in v0.4 and may still make breaking changes. After
+v1.0, the exported API follows the policy in STABILITY.md at the repository
+root.
+
+VARIABLES
+
+var (
+	// ErrMaxSteps is returned when a run exhausts its configured model turns.
+	ErrMaxSteps = errors.New("agent: maximum steps reached")
+	// ErrBusy is returned when a prompt, continuation, or reset races an active run.
+	ErrBusy = errors.New("agent: agent is busy")
+	// ErrNoMessages is returned when there is no conversation to continue.
+	ErrNoMessages = errors.New("agent: no messages to continue from")
+	// ErrCannotContinue is returned when the transcript tail is an assistant message
+	// and no queued message can be used instead.
+	ErrCannotContinue = errors.New("agent: cannot continue from an assistant message")
+	// ErrAborted is returned when a provider reports an aborted turn without the
+	// caller's context being canceled.
+	ErrAborted = errors.New("agent: run aborted")
+)
+
+TYPES
+
+type AfterToolCall func(context.Context, AfterToolCallContext) (*AfterToolCallResult, error)
+    AfterToolCall runs after tool execution and before tool_end is emitted.
+
+type AfterToolCallContext struct {
+	AssistantMessage ai.Message
+	ToolCall         ai.ToolCall
+	Args             any
+	Result           ToolResult
+	IsError          bool
+	Context          AgentContext
+}
+    AfterToolCallContext describes an executed tool call before finalization.
+
+type AfterToolCallResult struct {
+	Content           []ai.ContentBlock
+	Details           json.RawMessage
+	StructuredContent json.RawMessage
+	Usage             *ai.Usage
+	IsError           *bool
+	Terminate         *bool
+}
+    AfterToolCallResult replaces selected fields of an executed tool result.
+
+type Agent struct {
+	// Has unexported fields.
+}
+    Agent owns a mutable transcript, tool set, model, and pending input queues.
+    Only one run may be active at a time.
+
+func New(config Config) (*Agent, error)
+    New creates a stateful agent.
+
+func (a *Agent) Abort()
+    Abort cancels the active run. It is safe to call while idle.
+
+func (a *Agent) ClearAllQueues()
+    ClearAllQueues removes both queued steering and follow-up messages.
+
+func (a *Agent) ClearFollowUpQueue()
+    ClearFollowUpQueue removes queued follow-up messages.
+
+func (a *Agent) ClearSteeringQueue()
+    ClearSteeringQueue removes queued steering messages.
+
+func (a *Agent) Continue(ctx context.Context) (Result, error)
+    Continue resumes from the current transcript without adding a new user
+    message.
+
+func (a *Agent) FollowUp(message ai.Message)
+    FollowUp queues a message to run after the agent would otherwise stop.
+
+func (a *Agent) HasQueuedMessages() bool
+    HasQueuedMessages reports whether either input queue is non-empty.
+
+func (a *Agent) Messages() []ai.Message
+    Messages returns a deep copy of the transcript.
+
+func (a *Agent) PeekQueuedMessages() []ai.Message
+    PeekQueuedMessages previews the next messages without consuming them.
+
+func (a *Agent) Prompt(ctx context.Context, input string, images ...ai.ImageContent) (Result, error)
+    Prompt starts a run with one user text message and optional images.
+
+func (a *Agent) PromptMessages(ctx context.Context, messages ...ai.Message) (Result, error)
+    PromptMessages starts a run with one or more messages.
+
+func (a *Agent) Reset() error
+    Reset clears the transcript and queues, restoring the initial system prompt.
+
+func (a *Agent) Run(ctx context.Context, input string, images ...ai.ImageContent) (Result, error)
+    Run is a convenience alias for Prompt.
+
+func (a *Agent) SetMessages(messages []ai.Message)
+    SetMessages replaces the transcript. The initial system prompt is not
+    reinserted automatically; use Reset to restore the configured baseline.
+
+func (a *Agent) SetModel(model ai.Model) error
+    SetModel replaces the model used by future requests.
+
+func (a *Agent) SetRequestOptions(options ai.RequestOptions)
+    SetRequestOptions replaces default request options for future requests.
+
+func (a *Agent) SetThinkingLevel(level ThinkingLevel) error
+    SetThinkingLevel changes the reasoning level for future requests.
+
+func (a *Agent) SetTools(tools []Tool) error
+    SetTools replaces the executable tools for future runs.
+
+func (a *Agent) State() State
+    State returns a deep-copied snapshot of the current conversation state.
+
+func (a *Agent) Steer(message ai.Message)
+    Steer queues a message for injection after the current assistant turn.
+
+func (a *Agent) Subscribe(listener func(Event)) func()
+    Subscribe registers a synchronous event listener and returns an unsubscribe
+    function. Listeners run in registration order and are part of run
+    settlement.
+
+func (a *Agent) WaitForIdle(ctx context.Context) error
+    WaitForIdle waits for the active run and its event listeners to finish.
+
+type AgentContext struct {
+	Messages []ai.Message
+	Tools    []Tool
+}
+    AgentContext is the transcript and executable tools visible to one loop.
+
+type BeforeToolCall func(context.Context, BeforeToolCallContext) (*BeforeToolCallResult, error)
+    BeforeToolCall runs after argument validation and before execution.
+
+type BeforeToolCallContext struct {
+	AssistantMessage ai.Message
+	ToolCall         ai.ToolCall
+	Args             any
+	Context          AgentContext
+}
+    BeforeToolCallContext describes a validated tool call before execution.
+
+type BeforeToolCallResult struct {
+	Block     bool
+	Reason    string
+	Terminate bool
+}
+    BeforeToolCallResult can block a tool call and optionally terminate the
+    batch.
+
+type Config struct {
+	Model             ai.Model
+	SystemPrompt      string
+	Messages          []ai.Message
+	Tools             []Tool
+	MaxSteps          int
+	RequestOptions    ai.RequestOptions
+	ToolExecution     ToolExecutionMode
+	SteeringMode      QueueMode
+	FollowUpMode      QueueMode
+	SessionID         string
+	ThinkingLevel     ThinkingLevel
+	ThinkingBudgets   map[ThinkingLevel]int
+	TransformMessages MessageTransformer
+	BeforeToolCall    BeforeToolCall
+	AfterToolCall     AfterToolCall
+	PrepareRequest    PrepareRequest
+	PrepareNextTurn   PrepareNextTurn
+	FinishTurn        FinishTurn
+}
+    Config controls the reusable, stateful agent runtime.
+
+type Event struct {
+	Type          EventType    `json:"type"`
+	Step          int          `json:"step,omitempty"`
+	Text          string       `json:"text,omitempty"`
+	Thinking      string       `json:"thinking,omitempty"`
+	Message       *ai.Message  `json:"message,omitempty"`
+	ToolCall      *ai.ToolCall `json:"tool_call,omitempty"`
+	ToolResult    *ToolResult  `json:"tool_result,omitempty"`
+	PartialResult *ToolResult  `json:"partial_result,omitempty"`
+	ToolResults   []ToolResult `json:"tool_results,omitempty"`
+	DurationMs    int64        `json:"duration_ms,omitempty"`
+	Result        *Result      `json:"result,omitempty"`
+	Err           error        `json:"-"`
+	Error         string       `json:"error,omitempty"`
+}
+    Event is delivered synchronously while an agent run is in progress.
+
+type EventType string
+    EventType identifies a lifecycle or streaming event.
+
+const (
+	EventAgentStart    EventType = "agent_start"
+	EventTurnStart     EventType = "turn_start"
+	EventMessageStart  EventType = "message_start"
+	EventMessageDelta  EventType = "message_delta"
+	EventMessageEnd    EventType = "message_end"
+	EventThinkingStart EventType = "thinking_start"
+	EventThinkingDelta EventType = "thinking_delta"
+	EventThinkingEnd   EventType = "thinking_end"
+	EventToolStart     EventType = "tool_start"
+	EventToolUpdate    EventType = "tool_update"
+	EventToolEnd       EventType = "tool_end"
+	EventTurnEnd       EventType = "turn_end"
+	EventAgentEnd      EventType = "agent_end"
+	EventAgentError    EventType = "agent_error"
+)
+type FinishTurn func(context.Context, TurnContext) (TurnDecision, error)
+    FinishTurn runs after the assistant message and tool results are appended,
+    immediately before turn_end.
+
+type MessageTransformer func(context.Context, []ai.Message) ([]ai.Message, error)
+    MessageTransformer rewrites messages immediately before a model request.
+    The returned messages are request-only and do not mutate the transcript.
+
+type ModelError struct {
+	Message ai.Message
+	Err     error
+}
+    ModelError reports a provider or stream failure after the assistant message
+    has been finalized and appended to the transcript.
+
+func (e *ModelError) Error() string
+
+func (e *ModelError) Unwrap() error
+
+type PrepareNextTurn func(context.Context, TurnContext) (*TurnUpdate, error)
+    PrepareNextTurn runs after turn_end and before the next turn starts.
+
+type PrepareRequest func(context.Context, PrepareRequestContext) (*RequestUpdate, error)
+    PrepareRequest runs before every provider request, including the first.
+
+type PrepareRequestContext struct {
+	Context       AgentContext
+	Model         ai.Model
+	ThinkingLevel ThinkingLevel
+}
+    PrepareRequestContext describes the state immediately before a provider
+    call.
+
+type QueueMode string
+    QueueMode controls how many queued messages are drained at one point.
+
+const (
+	QueueAll        QueueMode = "all"
+	QueueOneAtATime QueueMode = "one-at-a-time"
+)
+type RequestUpdate struct {
+	Context       *AgentContext
+	Model         ai.Model
+	ThinkingLevel *ThinkingLevel
+}
+    RequestUpdate replaces selected request runtime state.
+
+type Result struct {
+	Answer       string        `json:"answer"`
+	Steps        int           `json:"steps"`
+	StopReason   ai.StopReason `json:"stop_reason"`
+	Messages     []ai.Message  `json:"messages"`
+	NewMessages  []ai.Message  `json:"new_messages"`
+	Usage        ai.Usage      `json:"usage"`
+	ErrorMessage string        `json:"error_message,omitempty"`
+}
+    Result is the complete outcome of one agent run.
+
+type State struct {
+	SystemPrompt     string
+	Model            ai.Model
+	ThinkingLevel    ThinkingLevel
+	Tools            []Tool
+	Messages         []ai.Message
+	IsStreaming      bool
+	StreamingMessage *ai.Message
+	PendingToolCalls []string
+	ErrorMessage     string
+}
+    State is a read-only snapshot of the agent's current conversation state.
+
+type StreamingTool interface {
+	Tool
+	ExecuteStream(ctx context.Context, call ai.ToolCall, update func(ToolResult)) (ToolResult, error)
+}
+    StreamingTool can publish partial results while it executes.
+
+type StreamingToolFunc func(context.Context, ai.ToolCall, func(ToolResult)) (ToolResult, error)
+    StreamingToolFunc is a function-backed streaming tool implementation.
+
+type ThinkingLevel string
+    ThinkingLevel is the requested reasoning level for a model turn.
+
+const (
+	ThinkingOff     ThinkingLevel = "off"
+	ThinkingMinimal ThinkingLevel = "minimal"
+	ThinkingLow     ThinkingLevel = "low"
+	ThinkingMedium  ThinkingLevel = "medium"
+	ThinkingHigh    ThinkingLevel = "high"
+	ThinkingXHigh   ThinkingLevel = "xhigh"
+	ThinkingMax     ThinkingLevel = "max"
+)
+type Tool interface {
+	Spec() ToolSpec
+	Execute(ctx context.Context, call ai.ToolCall) (ToolResult, error)
+}
+    Tool is a callable capability exposed to the model.
+
+func NewStreamingTool(spec ToolSpec, fn StreamingToolFunc) Tool
+    NewStreamingTool adapts a streaming function into a Tool.
+
+func NewTextTool(spec ToolSpec, fn func(context.Context, ai.ToolCall) (string, error)) Tool
+    NewTextTool adapts a text-returning function into a Tool.
+
+func NewTool(spec ToolSpec, fn ToolFunc) Tool
+    NewTool adapts a function into a Tool.
+
+type ToolExecutionMode string
+    ToolExecutionMode controls how tool calls in one assistant message execute.
+
+const (
+	ToolExecutionSequential ToolExecutionMode = "sequential"
+	ToolExecutionParallel   ToolExecutionMode = "parallel"
+)
+type ToolFunc func(context.Context, ai.ToolCall) (ToolResult, error)
+    ToolFunc is a function-backed tool implementation.
+
+type ToolResult struct {
+	Content           []ai.ContentBlock `json:"content"`
+	Details           json.RawMessage   `json:"details,omitempty"`
+	StructuredContent json.RawMessage   `json:"structured_content,omitempty"`
+	Usage             *ai.Usage         `json:"usage,omitempty"`
+	IsError           bool              `json:"is_error"`
+	Terminate         bool              `json:"terminate,omitempty"`
+}
+    ToolResult is the observation returned to the model after a tool call.
+
+func ErrorResult(text string) ToolResult
+    ErrorResult creates a failed text tool result.
+
+func TextResult(text string) ToolResult
+    TextResult creates a successful text tool result.
+
+func (r ToolResult) Text() string
+    Text returns all text blocks in the result joined without separators.
+
+type ToolSpec struct {
+	Name             string
+	Description      string
+	Parameters       map[string]any
+	Label            string
+	OutputSchema     map[string]any
+	ExecutionMode    ToolExecutionMode
+	PrepareArguments func(json.RawMessage) (json.RawMessage, error)
+}
+    ToolSpec is the model-facing declaration plus runtime execution hints.
+
+type TurnContext struct {
+	Message     ai.Message
+	ToolResults []ai.Message
+	Context     AgentContext
+	NewMessages []ai.Message
+}
+    TurnContext describes a completed assistant turn and its tool results.
+
+type TurnDecision string
+    TurnDecision tells the loop whether to continue or stop after a turn.
+
+const (
+	TurnDefault  TurnDecision = ""
+	TurnContinue TurnDecision = "continue"
+	TurnEnd      TurnDecision = "end"
+)
+type TurnUpdate struct {
+	Context       *AgentContext
+	Messages      []ai.Message
+	Model         ai.Model
+	ThinkingLevel *ThinkingLevel
+}
+    TurnUpdate replaces selected state before the next turn.
+

@@ -2,76 +2,122 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
-	"strings"
 	"sync"
+	"time"
 
 	"github.com/mrsibe/goat/ai"
 )
 
-const defaultMaxSteps = 10
-
 var (
 	// ErrMaxSteps is returned when a run exhausts its configured model turns.
 	ErrMaxSteps = errors.New("agent: maximum steps reached")
-	// ErrOutputLimit is returned when the model reaches its output length limit.
-	ErrOutputLimit = errors.New("agent: model output length limit reached")
-	// ErrModelStop is returned when a provider reports an unsuccessful terminal
-	// stop reason without a more specific stream error.
-	ErrModelStop = errors.New("agent: model stopped with an error")
+	// ErrBusy is returned when a prompt, continuation, or reset races an active run.
+	ErrBusy = errors.New("agent: agent is busy")
+	// ErrNoMessages is returned when there is no conversation to continue.
+	ErrNoMessages = errors.New("agent: no messages to continue from")
+	// ErrCannotContinue is returned when the transcript tail is an assistant message
+	// and no queued message can be used instead.
+	ErrCannotContinue = errors.New("agent: cannot continue from an assistant message")
+	// ErrAborted is returned when a provider reports an aborted turn without the
+	// caller's context being canceled.
+	ErrAborted = errors.New("agent: run aborted")
 )
 
-// ToolExecutionMode controls how tool calls in one assistant message execute.
-type ToolExecutionMode string
+// ModelError reports a provider or stream failure after the assistant message
+// has been finalized and appended to the transcript.
+type ModelError struct {
+	Message ai.Message
+	Err     error
+}
 
-const (
-	ToolExecutionSequential ToolExecutionMode = "sequential"
-	ToolExecutionParallel   ToolExecutionMode = "parallel"
-)
+func (e *ModelError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	if e.Message.ErrorMessage != "" {
+		return e.Message.ErrorMessage
+	}
+	return "agent: model stopped with an error"
+}
 
-// MessageTransformer can inject, prune, or rewrite messages before every model
-// request.
-type MessageTransformer func(context.Context, []ai.Message) ([]ai.Message, error)
+func (e *ModelError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
-// BeforeToolCall can block a tool call. Returning an error prevents execution
-// and sends the error text to the model as an error result.
-type BeforeToolCall func(context.Context, ai.ToolCall) error
-
-// AfterToolCall can replace the result of an executed tool call.
-type AfterToolCall func(context.Context, ai.ToolCall, ToolResult) ToolResult
-
-// Config controls the reusable agent runtime.
+// Config controls the reusable, stateful agent runtime.
 type Config struct {
 	Model             ai.Model
-	Tools             []Tool
 	SystemPrompt      string
+	Messages          []ai.Message
+	Tools             []Tool
 	MaxSteps          int
 	RequestOptions    ai.RequestOptions
 	ToolExecution     ToolExecutionMode
+	SteeringMode      QueueMode
+	FollowUpMode      QueueMode
+	SessionID         string
+	ThinkingLevel     ThinkingLevel
+	ThinkingBudgets   map[ThinkingLevel]int
 	TransformMessages MessageTransformer
 	BeforeToolCall    BeforeToolCall
 	AfterToolCall     AfterToolCall
+	PrepareRequest    PrepareRequest
+	PrepareNextTurn   PrepareNextTurn
+	FinishTurn        FinishTurn
 }
 
-// Agent coordinates model turns and tool execution.
+// Agent owns a mutable transcript, tool set, model, and pending input queues.
+// Only one run may be active at a time.
 type Agent struct {
+	mu      sync.Mutex
+	eventMu sync.Mutex
+
 	model             ai.Model
 	tools             toolRegistry
-	systemPrompt      string
-	maxSteps          int
+	messages          []ai.Message
+	baselineSystem    *ai.Message
 	requestOptions    ai.RequestOptions
+	maxSteps          int
 	toolExecution     ToolExecutionMode
+	steeringMode      QueueMode
+	followUpMode      QueueMode
+	steeringQueue     []ai.Message
+	followUpQueue     []ai.Message
 	transformMessages MessageTransformer
 	beforeToolCall    BeforeToolCall
 	afterToolCall     AfterToolCall
+	prepareRequest    PrepareRequest
+	prepareNextTurn   PrepareNextTurn
+	finishTurn        FinishTurn
+	thinkingLevel     ThinkingLevel
+	thinkingBudgets   map[ThinkingLevel]int
+	sessionID         string
+
+	listeners      map[uint64]func(Event)
+	nextListenerID uint64
+
+	active           *activeRun
+	isStreaming      bool
+	streamingMessage *ai.Message
+	pendingToolCalls map[string]struct{}
+	errorMessage     string
 }
 
-// New creates an agent. Agent values are immutable and may be shared across
-// concurrent sessions.
+type activeRun struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// New creates a stateful agent.
 func New(config Config) (*Agent, error) {
 	if config.Model == nil {
 		return nil, errors.New("agent: model must not be nil")
@@ -80,793 +126,894 @@ func New(config Config) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxSteps := config.MaxSteps
-	if maxSteps <= 0 {
-		maxSteps = defaultMaxSteps
+	if config.MaxSteps < 0 {
+		return nil, errors.New("agent: max steps must not be negative")
 	}
 	toolExecution := config.ToolExecution
 	if toolExecution == "" {
-		toolExecution = ToolExecutionSequential
+		toolExecution = ToolExecutionParallel
 	}
 	if toolExecution != ToolExecutionSequential && toolExecution != ToolExecutionParallel {
 		return nil, fmt.Errorf("agent: unsupported tool execution mode %q", toolExecution)
 	}
+	steeringMode := config.SteeringMode
+	if steeringMode == "" {
+		steeringMode = QueueOneAtATime
+	}
+	if steeringMode != QueueAll && steeringMode != QueueOneAtATime {
+		return nil, fmt.Errorf("agent: unsupported steering mode %q", steeringMode)
+	}
+	followUpMode := config.FollowUpMode
+	if followUpMode == "" {
+		followUpMode = QueueOneAtATime
+	}
+	if followUpMode != QueueAll && followUpMode != QueueOneAtATime {
+		return nil, fmt.Errorf("agent: unsupported follow-up mode %q", followUpMode)
+	}
+	thinkingLevel := config.ThinkingLevel
+	if thinkingLevel == "" {
+		thinkingLevel = ThinkingOff
+	}
+	if !validThinkingLevel(thinkingLevel) {
+		return nil, fmt.Errorf("agent: unsupported thinking level %q", thinkingLevel)
+	}
+
+	messages := ai.CloneMessages(config.Messages)
+	var baseline *ai.Message
+	if config.SystemPrompt != "" {
+		system := ai.TextMessage(ai.RoleSystem, config.SystemPrompt)
+		baseline = &system
+	}
+	if len(messages) > 0 && messages[0].Role == ai.RoleSystem {
+		system := ai.CloneMessage(messages[0])
+		baseline = &system
+	} else if baseline != nil {
+		messages = append([]ai.Message{*baseline}, messages...)
+	}
+
+	budgets := make(map[ThinkingLevel]int, len(config.ThinkingBudgets))
+	for level, budget := range config.ThinkingBudgets {
+		if budget > 0 {
+			budgets[level] = budget
+		}
+	}
+
 	return &Agent{
 		model:             config.Model,
 		tools:             tools,
-		systemPrompt:      config.SystemPrompt,
-		maxSteps:          maxSteps,
+		messages:          messages,
+		baselineSystem:    baseline,
 		requestOptions:    config.RequestOptions,
+		maxSteps:          config.MaxSteps,
 		toolExecution:     toolExecution,
+		steeringMode:      steeringMode,
+		followUpMode:      followUpMode,
 		transformMessages: config.TransformMessages,
 		beforeToolCall:    config.BeforeToolCall,
 		afterToolCall:     config.AfterToolCall,
+		prepareRequest:    config.PrepareRequest,
+		prepareNextTurn:   config.PrepareNextTurn,
+		finishTurn:        config.FinishTurn,
+		thinkingLevel:     thinkingLevel,
+		thinkingBudgets:   budgets,
+		sessionID:         config.SessionID,
+		listeners:         make(map[uint64]func(Event)),
+		pendingToolCalls:  make(map[string]struct{}),
 	}, nil
 }
 
-// Run executes a one-shot conversation in a new session.
-func (a *Agent) Run(ctx context.Context, input string, options ...RunOption) (Result, error) {
-	return a.NewSession().Run(ctx, input, options...)
-}
-
-// NewSession creates an in-memory conversation.
-func (a *Agent) NewSession() *Session {
-	messages := make([]ai.Message, 0, 1)
-	if a.systemPrompt != "" {
-		messages = append(messages, ai.TextMessage(ai.RoleSystem, a.systemPrompt))
-	}
-	return &Session{agent: a, messages: messages}
-}
-
-// NewSessionWithHistory restores a conversation. The agent's configured system
-// prompt is prepended when present; system messages in history are ignored so
-// that a restored session uses the agent's current prompt.
-func (a *Agent) NewSessionWithHistory(history []ai.Message) *Session {
-	session := a.NewSession()
-	for _, message := range history {
-		if message.Role == ai.RoleSystem {
-			continue
-		}
-		session.messages = append(session.messages, ai.CloneMessage(message))
-	}
-	return session
-}
-
-// Session stores the message history for a multi-turn conversation. A Session
-// must not be run concurrently.
-type Session struct {
-	agent    *Agent
-	messages []ai.Message
-}
-
-// Messages returns a copy of the session history.
-func (s *Session) Messages() []ai.Message {
-	if s == nil {
-		return nil
-	}
-	return ai.CloneMessages(s.messages)
-}
-
-// Run adds one user turn and continues until the model produces a final answer,
-// a tool-free turn fails, or the configured step limit is reached.
-func (s *Session) Run(ctx context.Context, input string, options ...RunOption) (Result, error) {
-	if s == nil || s.agent == nil {
-		return Result{}, errors.New("agent: session is not initialized")
-	}
-
-	runConfig := runOptions{}
-	for _, option := range options {
-		if option != nil {
-			option(&runConfig)
-		}
-	}
-	emit := func(event Event) {
-		if runConfig.onEvent != nil {
-			runConfig.onEvent(event)
-		}
-	}
-	requestOptions := mergeRequestOptions(s.agent.requestOptions, runConfig.requestOptions)
-
-	result := Result{}
-	emit(Event{Type: EventAgentStart})
-	s.appendMessage(ai.TextMessage(ai.RoleUser, input), 0, emit)
-
-	fail := func(err error) (Result, error) {
-		result.Messages = ai.CloneMessages(s.messages)
-		eventResult := cloneResult(result)
-		emit(Event{
-			Type:   EventAgentError,
-			Step:   result.Steps,
-			Result: &eventResult,
-			Err:    err,
-			Error:  err.Error(),
-		})
-		return result, err
-	}
-
-	for step := 1; step <= s.agent.maxSteps; step++ {
-		if err := ctx.Err(); err != nil {
-			return fail(err)
-		}
-
-		result.Steps = step
-		emit(Event{Type: EventTurnStart, Step: step})
-		assistant, stopReason, usage, err := s.runModelTurn(ctx, step, requestOptions, emit)
-		result.Usage.Add(usage)
-		if err != nil {
-			if stopReason == ai.StopReasonError || len(assistant.Content) > 0 {
-				result.StopReason = stopReason
-				result.Answer = assistant.Text()
-				s.messages = append(s.messages, ai.CloneMessage(assistant))
-				emitTurnEnd(emit, step, assistant, nil)
-			}
-			return fail(fmt.Errorf("agent: model call %d: %w", step, err))
-		}
-
-		result.StopReason = stopReason
-		result.Answer = assistant.Text()
-		s.messages = append(s.messages, ai.CloneMessage(assistant))
-		if stopReason == ai.StopReasonError {
-			emitTurnEnd(emit, step, assistant, nil)
-			return fail(ErrModelStop)
-		}
-		if stopReason == ai.StopReasonAborted {
-			emitTurnEnd(emit, step, assistant, nil)
-			return fail(context.Canceled)
-		}
-
-		toolCalls := assistant.ToolCalls()
-		if len(toolCalls) == 0 {
-			if stopReason == ai.StopReasonLength {
-				return fail(ErrOutputLimit)
-			}
-			emitTurnEnd(emit, step, assistant, nil)
-			result.Messages = ai.CloneMessages(s.messages)
-			eventResult := cloneResult(result)
-			emit(Event{Type: EventAgentEnd, Step: step, Result: &eventResult})
-			return result, nil
-		}
-
-		if stopReason == ai.StopReasonLength {
-			toolResults := make([]ToolResult, 0, len(toolCalls))
-			for _, call := range toolCalls {
-				toolResults = append(toolResults, s.rejectTruncatedToolCall(call, step, emit))
-			}
-			s.appendToolResults(toolCalls, toolResults, step, emit)
-			emitTurnEnd(emit, step, assistant, toolResults)
-			if step == s.agent.maxSteps {
-				return fail(ErrOutputLimit)
-			}
-			continue
-		}
-
-		toolResults := s.executeToolCalls(ctx, toolCalls, step, emit)
-		s.appendToolResults(toolCalls, toolResults, step, emit)
-		emitTurnEnd(emit, step, assistant, toolResults)
-	}
-
-	return fail(fmt.Errorf("%w after %d steps", ErrMaxSteps, s.agent.maxSteps))
-}
-
-func (s *Session) appendMessage(message ai.Message, step int, emit func(Event)) {
-	message = ai.CloneMessage(message)
-	s.messages = append(s.messages, message)
-	messageCopy := ai.CloneMessage(message)
-	emit(Event{Type: EventMessageStart, Step: step, Message: &messageCopy})
-	messageCopy = ai.CloneMessage(message)
-	emit(Event{Type: EventMessageEnd, Step: step, Message: &messageCopy})
-}
-
-func (s *Session) appendToolResults(calls []ai.ToolCall, results []ToolResult, step int, emit func(Event)) {
-	for index, result := range results {
-		call := calls[index]
-		s.appendMessage(
-			ai.ToolResultMessage(call.ID, call.Name, result.Content, result.IsError),
-			step,
-			emit,
-		)
+func validThinkingLevel(level ThinkingLevel) bool {
+	switch level {
+	case ThinkingOff, ThinkingMinimal, ThinkingLow, ThinkingMedium, ThinkingHigh, ThinkingXHigh, ThinkingMax:
+		return true
+	default:
+		return false
 	}
 }
 
-func emitTurnEnd(emit func(Event), step int, assistant ai.Message, toolResults []ToolResult) {
-	message := ai.CloneMessage(assistant)
-	results := cloneToolResults(toolResults)
-	emit(Event{
-		Type:        EventTurnEnd,
-		Step:        step,
-		Message:     &message,
-		ToolResults: results,
+// Subscribe registers a synchronous event listener and returns an unsubscribe
+// function. Listeners run in registration order and are part of run settlement.
+func (a *Agent) Subscribe(listener func(Event)) func() {
+	if listener == nil {
+		return func() {}
+	}
+	a.mu.Lock()
+	id := a.nextListenerID
+	a.nextListenerID++
+	a.listeners[id] = listener
+	a.mu.Unlock()
+	return func() {
+		a.mu.Lock()
+		delete(a.listeners, id)
+		a.mu.Unlock()
+	}
+}
+
+// Prompt starts a run with one user text message and optional images.
+func (a *Agent) Prompt(ctx context.Context, input string, images ...ai.ImageContent) (Result, error) {
+	content := []ai.ContentBlock{{Type: ai.BlockText, Text: input}}
+	for i := range images {
+		image := images[i]
+		content = append(content, ai.ContentBlock{Type: ai.BlockImage, Image: &image})
+	}
+	return a.PromptMessages(ctx, ai.Message{
+		Role:      ai.RoleUser,
+		Content:   content,
+		Timestamp: time.Now().UnixMilli(),
 	})
 }
 
-func cloneToolResults(results []ToolResult) []ToolResult {
-	if results == nil {
-		return nil
+// PromptMessages starts a run with one or more messages.
+func (a *Agent) PromptMessages(ctx context.Context, messages ...ai.Message) (Result, error) {
+	if len(messages) == 0 {
+		return Result{}, ErrNoMessages
 	}
-	cloned := make([]ToolResult, len(results))
-	for index, result := range results {
-		cloned[index] = ToolResult{
-			Content: ai.CloneContentBlocks(result.Content),
-			IsError: result.IsError,
-		}
-	}
-	return cloned
+	return a.runMessages(ctx, ai.CloneMessages(messages), false, false, false)
 }
 
-func (s *Session) runModelTurn(
-	ctx context.Context,
-	step int,
-	options ai.RequestOptions,
-	emit func(Event),
-) (ai.Message, ai.StopReason, ai.Usage, error) {
-	messages := ai.CloneMessages(s.messages)
-	if s.agent.transformMessages != nil {
-		transformed, err := s.agent.transformMessages(ctx, messages)
-		if err != nil {
-			return ai.Message{}, "", ai.Usage{}, fmt.Errorf("transform messages: %w", err)
-		}
-		messages = ai.CloneMessages(transformed)
+// Continue resumes from the current transcript without adding a new user message.
+func (a *Agent) Continue(ctx context.Context) (Result, error) {
+	a.mu.Lock()
+	messages := ai.CloneMessages(a.messages)
+	busy := a.active != nil
+	a.mu.Unlock()
+	if busy {
+		return Result{}, ErrBusy
 	}
-
-	stream, err := s.agent.model.Stream(ctx, ai.Request{
-		Messages: messages,
-		Tools:    s.agent.tools.list(),
-		Options:  options,
-	})
-	if err != nil {
-		return ai.Message{}, "", ai.Usage{}, err
+	if len(messages) == 0 {
+		return Result{}, ErrNoMessages
 	}
-	if stream == nil {
-		return ai.Message{}, "", ai.Usage{}, errors.New("model returned a nil stream")
-	}
-	defer stream.Close()
-
-	emit(Event{
-		Type:    EventMessageStart,
-		Step:    step,
-		Message: &ai.Message{Role: ai.RoleAssistant},
-	})
-
-	accumulator := newAssistantAccumulator()
-	var usage ai.Usage
-	var stopReason ai.StopReason
-	var finalMessage *ai.Message
-	sawUsage := false
-	sawDone := false
-
-	for {
-		if err := ctx.Err(); err != nil {
-			assistant, reason, finishErr := s.finishFailedModelTurn(
-				accumulator,
-				finalMessage,
-				step,
-				ai.StopReasonAborted,
-				emit,
-				err,
-			)
-			return assistant, reason, usage, finishErr
-		}
-		event, nextErr := stream.Next()
-		if errors.Is(nextErr, io.EOF) {
+	allSystem := true
+	for _, message := range messages {
+		if message.Role != ai.RoleSystem {
+			allSystem = false
 			break
 		}
-		if nextErr != nil {
-			assistant, reason, finishErr := s.finishFailedModelTurn(
-				accumulator,
-				finalMessage,
-				step,
-				ai.StopReasonError,
-				emit,
-				nextErr,
-			)
-			return assistant, reason, usage, finishErr
-		}
-
-		switch event.Type {
-		case ai.EventStart, ai.EventTextStart, ai.EventTextEnd:
-		case ai.EventTextDelta:
-			if event.TextDelta != "" {
-				accumulator.addText(event.TextDelta)
-				text := event.TextDelta
-				partial := cloneMessagePointer(event.Partial)
-				emit(Event{Type: EventMessageDelta, Step: step, Text: text, Message: partial})
-			}
-		case ai.EventThinkingStart:
-			partial := cloneMessagePointer(event.Partial)
-			emit(Event{Type: EventThinkingStart, Step: step, Message: partial})
-		case ai.EventThinkingDelta:
-			if event.ThinkingDelta != "" {
-				accumulator.addThinking(event.ThinkingDelta)
-				partial := cloneMessagePointer(event.Partial)
-				emit(Event{
-					Type:     EventThinkingDelta,
-					Step:     step,
-					Thinking: event.ThinkingDelta,
-					Message:  partial,
-				})
-			}
-		case ai.EventThinkingEnd:
-			partial := cloneMessagePointer(event.Partial)
-			emit(Event{Type: EventThinkingEnd, Step: step, Thinking: event.Thinking, Message: partial})
-		case ai.EventToolCallStart:
-			if event.ToolCall == nil {
-				return ai.Message{}, stopReason, usage, errors.New("tool call start is missing its payload")
-			}
-			accumulator.startToolCall(event.ContentIndex, *event.ToolCall)
-		case ai.EventToolCallDelta:
-			if event.ToolCallDelta == nil {
-				return ai.Message{}, stopReason, usage, errors.New("tool call delta is missing its payload")
-			}
-			if err := accumulator.addToolCall(event.ContentIndex, *event.ToolCallDelta); err != nil {
-				return ai.Message{}, stopReason, usage, err
-			}
-		case ai.EventToolCallEnd:
-			if event.ToolCall == nil {
-				return ai.Message{}, stopReason, usage, errors.New("tool call end is missing its payload")
-			}
-			accumulator.finishToolCall(event.ContentIndex, *event.ToolCall)
-		case ai.EventUsage:
-			if event.Usage != nil {
-				usage.Add(*event.Usage)
-				sawUsage = true
-			}
-		case ai.EventDone:
-			sawDone = true
-			stopReason = event.StopReason
-			if event.Message != nil {
-				message := ai.CloneMessage(*event.Message)
-				finalMessage = &message
-			}
-			if !sawUsage && event.Usage != nil {
-				usage = *event.Usage
-			}
-		case ai.EventError:
-			if event.StopReason == "" {
-				event.StopReason = ai.StopReasonError
-			}
-			if event.Message != nil {
-				message := ai.CloneMessage(*event.Message)
-				finalMessage = &message
-			} else if event.Partial != nil {
-				message := ai.CloneMessage(*event.Partial)
-				finalMessage = &message
-			}
-			if !sawUsage && event.Usage != nil {
-				usage = *event.Usage
-			}
-			var streamErr error
-			if event.Err != nil {
-				streamErr = event.Err
-			} else if event.Error != "" {
-				streamErr = errors.New(event.Error)
-			} else {
-				streamErr = errors.New("model stream reported an error")
-			}
-			assistant, reason, finishErr := s.finishFailedModelTurn(
-				accumulator,
-				finalMessage,
-				step,
-				event.StopReason,
-				emit,
-				streamErr,
-			)
-			return assistant, reason, usage, finishErr
-		default:
-			return ai.Message{}, stopReason, usage, fmt.Errorf("unknown model event type %q", event.Type)
-		}
 	}
-
-	if !sawDone {
-		stopReason = ai.StopReasonStop
-		if len(accumulator.toolIndexes) > 0 {
-			stopReason = ai.StopReasonToolCalls
-		}
+	if allSystem {
+		return Result{}, ErrNoMessages
 	}
-	assistant, err := assistantMessage(accumulator, finalMessage, step)
-	if err != nil {
-		return ai.Message{}, stopReason, usage, err
+	last := messages[len(messages)-1]
+	if last.Role != ai.RoleAssistant {
+		return a.runMessages(ctx, nil, true, false, false)
 	}
-	messageCopy := ai.CloneMessage(assistant)
-	emit(Event{Type: EventMessageEnd, Step: step, Message: &messageCopy})
-	return assistant, stopReason, usage, nil
+	return a.runMessages(ctx, nil, false, false, true)
 }
 
-func cloneMessagePointer(message *ai.Message) *ai.Message {
-	if message == nil {
+// Run is a convenience alias for Prompt.
+func (a *Agent) Run(ctx context.Context, input string, images ...ai.ImageContent) (Result, error) {
+	return a.Prompt(ctx, input, images...)
+}
+
+func (a *Agent) runMessages(
+	ctx context.Context,
+	prompts []ai.Message,
+	continuation bool,
+	skipInitialSteering bool,
+	continueFromAssistant bool,
+) (result Result, err error) {
+	a.mu.Lock()
+	if a.active != nil {
+		a.mu.Unlock()
+		return Result{}, ErrBusy
+	}
+	if continueFromAssistant {
+		steering := peekQueue(a.steeringQueue, a.steeringMode)
+		if len(steering) > 0 {
+			a.steeringQueue = a.steeringQueue[len(steering):]
+			prompts = steering
+			continuation = false
+			skipInitialSteering = true
+		} else {
+			followUp := peekQueue(a.followUpQueue, a.followUpMode)
+			if len(followUp) > 0 {
+				a.followUpQueue = a.followUpQueue[len(followUp):]
+				prompts = followUp
+				continuation = false
+			} else {
+				a.mu.Unlock()
+				return Result{}, ErrCannotContinue
+			}
+		}
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	active := &activeRun{cancel: cancel, done: make(chan struct{})}
+	a.active = active
+	a.isStreaming = true
+	a.streamingMessage = nil
+	a.errorMessage = ""
+	a.mu.Unlock()
+
+	defer func() {
+		cancel()
+		a.mu.Lock()
+		a.isStreaming = false
+		a.streamingMessage = nil
+		a.pendingToolCalls = make(map[string]struct{})
+		a.active = nil
+		close(active.done)
+		a.mu.Unlock()
+	}()
+
+	return a.runLoop(runCtx, prompts, continuation, skipInitialSteering)
+}
+
+// Abort cancels the active run. It is safe to call while idle.
+func (a *Agent) Abort() {
+	a.mu.Lock()
+	active := a.active
+	a.mu.Unlock()
+	if active != nil {
+		active.cancel()
+	}
+}
+
+// WaitForIdle waits for the active run and its event listeners to finish.
+func (a *Agent) WaitForIdle(ctx context.Context) error {
+	a.mu.Lock()
+	active := a.active
+	a.mu.Unlock()
+	if active == nil {
 		return nil
 	}
-	cloned := ai.CloneMessage(*message)
-	return &cloned
-}
-
-func (s *Session) finishFailedModelTurn(
-	accumulator *assistantAccumulator,
-	finalMessage *ai.Message,
-	step int,
-	stopReason ai.StopReason,
-	emit func(Event),
-	err error,
-) (ai.Message, ai.StopReason, error) {
-	if stopReason == "" {
-		stopReason = ai.StopReasonError
-	}
-	assistant, buildErr := assistantMessage(accumulator, finalMessage, step)
-	if buildErr != nil {
-		return ai.Message{}, stopReason, errors.Join(err, buildErr)
-	}
-	messageCopy := ai.CloneMessage(assistant)
-	emit(Event{Type: EventMessageEnd, Step: step, Message: &messageCopy})
-	return assistant, stopReason, err
-}
-
-func assistantMessage(
-	accumulator *assistantAccumulator,
-	finalMessage *ai.Message,
-	step int,
-) (ai.Message, error) {
-	if finalMessage != nil {
-		return ai.CloneMessage(*finalMessage), nil
-	}
-	return accumulator.message(step)
-}
-
-type preparedToolCall struct {
-	call      ai.ToolCall
-	tool      Tool
-	immediate *ToolResult
-}
-
-func (s *Session) executeToolCalls(
-	ctx context.Context,
-	calls []ai.ToolCall,
-	step int,
-	emit func(Event),
-) []ToolResult {
-	if s.agent.toolExecution == ToolExecutionParallel {
-		return s.executeToolCallsParallel(ctx, calls, step, emit)
-	}
-	results := make([]ToolResult, len(calls))
-	for index, call := range calls {
-		results[index] = s.executeTool(ctx, call, step, emit)
-	}
-	return results
-}
-
-func (s *Session) executeToolCallsParallel(
-	ctx context.Context,
-	calls []ai.ToolCall,
-	step int,
-	emit func(Event),
-) []ToolResult {
-	prepared := make([]preparedToolCall, len(calls))
-	for index, call := range calls {
-		prepared[index] = s.prepareTool(ctx, call, step, emit)
-	}
-
-	type completion struct {
-		index  int
-		result ToolResult
-	}
-	completed := make(chan completion, len(calls))
-	var wait sync.WaitGroup
-	for index, item := range prepared {
-		if item.immediate != nil {
-			completed <- completion{index: index, result: *item.immediate}
-			continue
-		}
-		wait.Add(1)
-		go func(index int, item preparedToolCall) {
-			defer wait.Done()
-			completed <- completion{
-				index:  index,
-				result: s.executePreparedTool(ctx, item),
-			}
-		}(index, item)
-	}
-	wait.Wait()
-	close(completed)
-
-	results := make([]ToolResult, len(calls))
-	for item := range completed {
-		results[item.index] = s.finishTool(ctx, prepared[item.index].call, item.result, step, emit)
-	}
-	return results
-}
-
-func (s *Session) executeTool(ctx context.Context, call ai.ToolCall, step int, emit func(Event)) ToolResult {
-	prepared := s.prepareTool(ctx, call, step, emit)
-	if prepared.immediate != nil {
-		return s.finishTool(ctx, prepared.call, *prepared.immediate, step, emit)
-	}
-	result := s.executePreparedTool(ctx, prepared)
-	return s.finishTool(ctx, prepared.call, result, step, emit)
-}
-
-func (s *Session) prepareTool(ctx context.Context, call ai.ToolCall, step int, emit func(Event)) preparedToolCall {
-	callCopy := ai.CloneToolCall(call)
-	emit(Event{Type: EventToolStart, Step: step, ToolCall: &callCopy})
-
-	tool, spec, ok := s.agent.tools.get(call.Name)
-	if !ok {
-		result := textErrorResult(fmt.Sprintf("unknown tool %q", call.Name))
-		return preparedToolCall{call: callCopy, immediate: &result}
-	}
-
-	arguments := call.Arguments
-	if len(strings.TrimSpace(string(arguments))) == 0 {
-		arguments = json.RawMessage("{}")
-	}
-	callCopy.Arguments = append(json.RawMessage(nil), arguments...)
-	if call.ArgumentsError != "" {
-		result := textErrorResult(fmt.Sprintf(
-			"invalid arguments for tool %q: %s",
-			call.Name,
-			call.ArgumentsError,
-		))
-		return preparedToolCall{call: callCopy, immediate: &result}
-	}
-	if err := validateToolArguments(spec, callCopy.Arguments); err != nil {
-		result := textErrorResult(fmt.Sprintf(
-			"invalid arguments for tool %q: %s",
-			call.Name,
-			err,
-		))
-		return preparedToolCall{call: callCopy, immediate: &result}
-	}
-	if s.agent.beforeToolCall != nil {
-		if err := s.agent.beforeToolCall(ctx, callCopy); err != nil {
-			result := textErrorResult(err.Error())
-			return preparedToolCall{call: callCopy, immediate: &result}
-		}
-	}
-	return preparedToolCall{call: callCopy, tool: tool}
-}
-
-func (s *Session) executePreparedTool(ctx context.Context, prepared preparedToolCall) (result ToolResult) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			result = textErrorResult(fmt.Sprintf(
-				"tool %q panicked: %v",
-				prepared.call.Name,
-				recovered,
-			))
-		}
-	}()
-	result, err := prepared.tool.Execute(ctx, prepared.call)
-	if err != nil {
-		return textErrorResult(err.Error())
-	}
-	if len(result.Content) == 0 {
-		result.Content = []ai.ContentBlock{{Type: ai.BlockText, Text: ""}}
-	}
-	result.Content = ai.CloneContentBlocks(result.Content)
-	if err := validateToolResult(result); err != nil {
-		return textErrorResult(fmt.Sprintf("tool %q returned invalid content: %s", prepared.call.Name, err))
-	}
-	return result
-}
-
-func textErrorResult(text string) ToolResult {
-	return ToolResult{
-		Content: []ai.ContentBlock{{Type: ai.BlockText, Text: text}},
-		IsError: true,
+	select {
+	case <-active.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
-func (s *Session) rejectTruncatedToolCall(call ai.ToolCall, step int, emit func(Event)) ToolResult {
-	callCopy := ai.CloneToolCall(call)
-	emit(Event{Type: EventToolStart, Step: step, ToolCall: &callCopy})
-	content := fmt.Sprintf(
-		"tool call %q was not executed because the response hit the output token limit; its arguments may be truncated. Re-issue the call with complete arguments.",
-		call.Name,
-	)
-	result := textErrorResult(content)
-	s.emitToolEnd(callCopy, result, step, emit)
-	return result
-}
-
-func (s *Session) finishTool(
-	ctx context.Context,
-	call ai.ToolCall,
-	result ToolResult,
-	step int,
-	emit func(Event),
-) ToolResult {
-	if s.agent.afterToolCall != nil {
-		result = s.agent.afterToolCall(ctx, call, result)
+// Reset clears the transcript and queues, restoring the initial system prompt.
+func (a *Agent) Reset() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != nil {
+		return ErrBusy
 	}
-	result.Content = ai.CloneContentBlocks(result.Content)
-	if err := validateToolResult(result); err != nil {
-		result = textErrorResult(fmt.Sprintf("tool %q returned invalid content: %s", call.Name, err))
+	a.messages = nil
+	if a.baselineSystem != nil {
+		a.messages = []ai.Message{ai.CloneMessage(*a.baselineSystem)}
 	}
-	s.emitToolEnd(call, result, step, emit)
-	return result
-}
-
-func (s *Session) emitToolEnd(call ai.ToolCall, result ToolResult, step int, emit func(Event)) {
-	callCopy := ai.CloneToolCall(call)
-	resultCopy := ToolResult{
-		Content: ai.CloneContentBlocks(result.Content),
-		IsError: result.IsError,
-	}
-	emit(Event{
-		Type:       EventToolEnd,
-		Step:       step,
-		ToolCall:   &callCopy,
-		ToolResult: &resultCopy,
-	})
-}
-
-type toolCallAccumulator struct {
-	id             string
-	name           string
-	arguments      strings.Builder
-	argumentsError string
-	final          *ai.ToolCall
-}
-
-type assistantAccumulator struct {
-	text        strings.Builder
-	thinking    strings.Builder
-	calls       map[int]*toolCallAccumulator
-	toolIndexes []int
-}
-
-func newAssistantAccumulator() *assistantAccumulator {
-	return &assistantAccumulator{calls: make(map[int]*toolCallAccumulator)}
-}
-
-func (a *assistantAccumulator) addText(text string) {
-	a.text.WriteString(text)
-}
-
-func (a *assistantAccumulator) addThinking(thinking string) {
-	a.thinking.WriteString(thinking)
-}
-
-func (a *assistantAccumulator) startToolCall(index int, call ai.ToolCall) {
-	acc := a.ensureToolCall(index)
-	if call.ID != "" {
-		acc.id = call.ID
-	}
-	if call.Name != "" {
-		acc.name = call.Name
-	}
-}
-
-func (a *assistantAccumulator) finishToolCall(index int, call ai.ToolCall) {
-	acc := a.ensureToolCall(index)
-	if call.ID != "" {
-		acc.id = call.ID
-	}
-	if call.Name != "" {
-		acc.name = call.Name
-	}
-	if call.ArgumentsError != "" {
-		acc.argumentsError = call.ArgumentsError
-	}
-	cloned := ai.CloneToolCall(call)
-	acc.final = &cloned
-}
-
-func (a *assistantAccumulator) addToolCall(index int, delta ai.ToolCallDelta) error {
-	if index < 0 {
-		return errors.New("tool call index must not be negative")
-	}
-	call := a.ensureToolCall(index)
-	if delta.ID != "" {
-		call.id = delta.ID
-	}
-	if delta.Name != "" {
-		call.name = delta.Name
-	}
-	call.arguments.WriteString(delta.ArgumentsDelta)
+	a.steeringQueue = nil
+	a.followUpQueue = nil
+	a.isStreaming = false
+	a.streamingMessage = nil
+	a.pendingToolCalls = make(map[string]struct{})
+	a.errorMessage = ""
 	return nil
 }
 
-func (a *assistantAccumulator) ensureToolCall(index int) *toolCallAccumulator {
-	call, exists := a.calls[index]
-	if !exists {
-		call = &toolCallAccumulator{}
-		a.calls[index] = call
-		a.toolIndexes = append(a.toolIndexes, index)
+// State returns a deep-copied snapshot of the current conversation state.
+func (a *Agent) State() State {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	state := State{
+		SystemPrompt:     systemPromptFromMessages(a.messages),
+		Model:            a.model,
+		ThinkingLevel:    a.thinkingLevel,
+		Tools:            a.tools.listTools(),
+		Messages:         ai.CloneMessages(a.messages),
+		IsStreaming:      a.isStreaming,
+		ErrorMessage:     a.errorMessage,
+		PendingToolCalls: make([]string, 0, len(a.pendingToolCalls)),
 	}
-	return call
+	if a.streamingMessage != nil {
+		message := ai.CloneMessage(*a.streamingMessage)
+		state.StreamingMessage = &message
+	}
+	for id := range a.pendingToolCalls {
+		state.PendingToolCalls = append(state.PendingToolCalls, id)
+	}
+	sort.Strings(state.PendingToolCalls)
+	return state
 }
 
-func (a *assistantAccumulator) message(step int) (ai.Message, error) {
-	message := ai.Message{Role: ai.RoleAssistant}
-	if a.text.Len() > 0 {
-		message.Content = append(message.Content, ai.ContentBlock{
-			Type: ai.BlockText,
-			Text: a.text.String(),
-		})
+// SetModel replaces the model used by future requests.
+func (a *Agent) SetModel(model ai.Model) error {
+	if model == nil {
+		return errors.New("agent: model must not be nil")
 	}
-	if a.thinking.Len() > 0 {
-		message.Content = append(message.Content, ai.ContentBlock{
-			Type:     ai.BlockThinking,
-			Thinking: a.thinking.String(),
-		})
-	}
-	sort.Ints(a.toolIndexes)
-	seenIDs := make(map[string]struct{}, len(a.toolIndexes))
-	for _, index := range a.toolIndexes {
-		call := a.calls[index]
-		id := call.id
-		name := call.name
-		arguments := call.arguments.String()
-		argumentsError := call.argumentsError
-		if call.final != nil {
-			if call.final.ID != "" {
-				id = call.final.ID
-			}
-			if call.final.Name != "" {
-				name = call.final.Name
-			}
-			if len(call.final.Arguments) > 0 {
-				arguments = string(call.final.Arguments)
-			}
-			if call.final.ArgumentsError != "" {
-				argumentsError = call.final.ArgumentsError
-			}
-		}
-		if name == "" {
-			return ai.Message{}, fmt.Errorf("tool call %d is missing a name", index)
-		}
-		if id == "" {
-			id = fmt.Sprintf("call_%d_%d", step, index)
-		}
-		if _, exists := seenIDs[id]; exists {
-			return ai.Message{}, fmt.Errorf("duplicate tool call id %q", id)
-		}
-		seenIDs[id] = struct{}{}
-		if strings.TrimSpace(arguments) == "" {
-			arguments = "{}"
-		}
-		toolCall := ai.ToolCall{
-			ID:             id,
-			Name:           name,
-			Arguments:      json.RawMessage(arguments),
-			ArgumentsError: argumentsError,
-		}
-		message.Content = append(message.Content, ai.ContentBlock{
-			Type:     ai.BlockToolCall,
-			ToolCall: &toolCall,
-		})
-	}
-	return message, nil
+	a.mu.Lock()
+	a.model = model
+	a.mu.Unlock()
+	return nil
 }
 
-func mergeRequestOptions(base ai.RequestOptions, override *ai.RequestOptions) ai.RequestOptions {
-	if override == nil {
-		return base
+// SetThinkingLevel changes the reasoning level for future requests.
+func (a *Agent) SetThinkingLevel(level ThinkingLevel) error {
+	if level == "" {
+		level = ThinkingOff
 	}
-	merged := base
-	if override.Temperature != nil {
-		merged.Temperature = override.Temperature
+	if !validThinkingLevel(level) {
+		return fmt.Errorf("agent: unsupported thinking level %q", level)
 	}
-	if override.TopP != nil {
-		merged.TopP = override.TopP
+	a.mu.Lock()
+	a.thinkingLevel = level
+	a.mu.Unlock()
+	return nil
+}
+
+// SetRequestOptions replaces default request options for future requests.
+func (a *Agent) SetRequestOptions(options ai.RequestOptions) {
+	a.mu.Lock()
+	a.requestOptions = options
+	a.mu.Unlock()
+}
+
+// SetTools replaces the executable tools for future runs.
+func (a *Agent) SetTools(tools []Tool) error {
+	registry, err := newToolRegistry(tools)
+	if err != nil {
+		return err
 	}
-	if override.MaxTokens > 0 {
-		merged.MaxTokens = override.MaxTokens
+	a.mu.Lock()
+	a.tools = registry
+	a.mu.Unlock()
+	return nil
+}
+
+// SetMessages replaces the transcript. The initial system prompt is not
+// reinserted automatically; use Reset to restore the configured baseline.
+func (a *Agent) SetMessages(messages []ai.Message) {
+	a.mu.Lock()
+	a.messages = ai.CloneMessages(messages)
+	a.mu.Unlock()
+}
+
+// Messages returns a deep copy of the transcript.
+func (a *Agent) Messages() []ai.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return ai.CloneMessages(a.messages)
+}
+
+// Steer queues a message for injection after the current assistant turn.
+func (a *Agent) Steer(message ai.Message) {
+	a.mu.Lock()
+	a.steeringQueue = append(a.steeringQueue, ai.CloneMessage(message))
+	a.mu.Unlock()
+}
+
+// FollowUp queues a message to run after the agent would otherwise stop.
+func (a *Agent) FollowUp(message ai.Message) {
+	a.mu.Lock()
+	a.followUpQueue = append(a.followUpQueue, ai.CloneMessage(message))
+	a.mu.Unlock()
+}
+
+// ClearSteeringQueue removes queued steering messages.
+func (a *Agent) ClearSteeringQueue() {
+	a.mu.Lock()
+	a.steeringQueue = nil
+	a.mu.Unlock()
+}
+
+// ClearFollowUpQueue removes queued follow-up messages.
+func (a *Agent) ClearFollowUpQueue() {
+	a.mu.Lock()
+	a.followUpQueue = nil
+	a.mu.Unlock()
+}
+
+// ClearAllQueues removes both queued steering and follow-up messages.
+func (a *Agent) ClearAllQueues() {
+	a.ClearSteeringQueue()
+	a.ClearFollowUpQueue()
+}
+
+// HasQueuedMessages reports whether either input queue is non-empty.
+func (a *Agent) HasQueuedMessages() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.steeringQueue) > 0 || len(a.followUpQueue) > 0
+}
+
+// PeekQueuedMessages previews the next messages without consuming them.
+func (a *Agent) PeekQueuedMessages() []ai.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.steeringQueue) > 0 {
+		return peekQueue(a.steeringQueue, a.steeringMode)
 	}
-	if override.ToolChoice.Mode != "" {
-		merged.ToolChoice = override.ToolChoice
+	return peekQueue(a.followUpQueue, a.followUpMode)
+}
+
+func (a *Agent) drainSteering() []ai.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	drained := peekQueue(a.steeringQueue, a.steeringMode)
+	a.steeringQueue = a.steeringQueue[len(drained):]
+	return drained
+}
+
+func (a *Agent) drainFollowUp() []ai.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	drained := peekQueue(a.followUpQueue, a.followUpMode)
+	a.followUpQueue = a.followUpQueue[len(drained):]
+	return drained
+}
+
+func peekQueue(queue []ai.Message, mode QueueMode) []ai.Message {
+	if len(queue) == 0 {
+		return nil
 	}
-	if override.SessionID != "" {
-		merged.SessionID = override.SessionID
+	count := 1
+	if mode == QueueAll {
+		count = len(queue)
 	}
-	if override.ReasoningEffort != "" {
-		merged.ReasoningEffort = override.ReasoningEffort
+	return ai.CloneMessages(queue[:count])
+}
+
+func (a *Agent) contextSnapshot() AgentContext {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return AgentContext{
+		Messages: ai.CloneMessages(a.messages),
+		Tools:    a.tools.listTools(),
 	}
-	if override.ThinkingBudgetTokens > 0 {
-		merged.ThinkingBudgetTokens = override.ThinkingBudgetTokens
+}
+
+func (a *Agent) currentModel() ai.Model {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.model
+}
+
+func (a *Agent) currentThinkingLevel() ThinkingLevel {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.thinkingLevel
+}
+
+func (a *Agent) requestOptionsFor(level ThinkingLevel) ai.RequestOptions {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	options := a.requestOptions
+	if a.sessionID != "" {
+		options.SessionID = a.sessionID
 	}
-	return merged
+	if level != ThinkingOff {
+		if options.ReasoningEffort == "" {
+			options.ReasoningEffort = string(level)
+		}
+		if options.ThinkingBudgetTokens == 0 {
+			options.ThinkingBudgetTokens = a.thinkingBudgets[level]
+		}
+	}
+	return options
+}
+
+func (a *Agent) emit(event Event) {
+	a.eventMu.Lock()
+	defer a.eventMu.Unlock()
+
+	a.mu.Lock()
+	switch event.Type {
+	case EventMessageStart:
+		if event.Message != nil {
+			message := ai.CloneMessage(*event.Message)
+			a.streamingMessage = &message
+		}
+	case EventMessageDelta, EventThinkingStart, EventThinkingDelta, EventThinkingEnd:
+		if event.Message != nil {
+			message := ai.CloneMessage(*event.Message)
+			a.streamingMessage = &message
+		}
+	case EventMessageEnd:
+		if event.Message != nil {
+			a.messages = append(a.messages, ai.CloneMessage(*event.Message))
+		}
+		a.streamingMessage = nil
+	case EventToolStart:
+		if event.ToolCall != nil {
+			a.pendingToolCalls[event.ToolCall.ID] = struct{}{}
+		}
+	case EventToolEnd:
+		if event.ToolCall != nil {
+			delete(a.pendingToolCalls, event.ToolCall.ID)
+		}
+	case EventTurnEnd:
+		if event.Message != nil && event.Message.Role == ai.RoleAssistant && event.Message.ErrorMessage != "" {
+			a.errorMessage = event.Message.ErrorMessage
+		}
+	case EventAgentError:
+		if event.Error != "" {
+			a.errorMessage = event.Error
+		}
+	case EventAgentEnd:
+		a.streamingMessage = nil
+	}
+	ids := make([]uint64, 0, len(a.listeners))
+	for id := range a.listeners {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	listeners := make([]func(Event), 0, len(ids))
+	for _, id := range ids {
+		listeners = append(listeners, a.listeners[id])
+	}
+	a.mu.Unlock()
+
+	for _, listener := range listeners {
+		listener(event)
+	}
+}
+
+func (a *Agent) emitMessage(message ai.Message, step int) {
+	start := ai.CloneMessage(message)
+	a.emit(Event{Type: EventMessageStart, Step: step, Message: &start})
+	end := ai.CloneMessage(message)
+	a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+}
+
+func (a *Agent) runLoop(
+	ctx context.Context,
+	prompts []ai.Message,
+	continuation bool,
+	skipInitialSteering bool,
+) (Result, error) {
+	result := Result{}
+	newMessages := make([]ai.Message, 0, len(prompts)+2)
+	finish := func() (Result, error) {
+		result.NewMessages = ai.CloneMessages(newMessages)
+		return a.finishResult(result)
+	}
+	fail := func(err error, synthesize bool) (Result, error) {
+		result.NewMessages = ai.CloneMessages(newMessages)
+		return a.failResult(result, err, synthesize)
+	}
+	currentContext := a.contextSnapshot()
+	model := a.currentModel()
+	thinking := a.currentThinkingLevel()
+
+	a.emit(Event{Type: EventAgentStart})
+
+	var pending []ai.Message
+	if !skipInitialSteering {
+		pending = a.drainSteering()
+	}
+	first := true
+	var lastTurn *TurnContext
+	explicitContinuation := false
+	var assistantEmitted bool
+
+	for {
+		assistantEmitted = false
+		if first {
+			a.emit(Event{Type: EventTurnStart, Step: 1})
+			if !continuation {
+				for _, message := range prompts {
+					a.emitMessage(message, 1)
+					currentContext.Messages = append(currentContext.Messages, ai.CloneMessage(message))
+					newMessages = append(newMessages, ai.CloneMessage(message))
+				}
+			}
+			for _, message := range pending {
+				a.emitMessage(message, 1)
+				currentContext.Messages = append(currentContext.Messages, ai.CloneMessage(message))
+				newMessages = append(newMessages, ai.CloneMessage(message))
+			}
+			pending = nil
+			first = false
+		} else {
+			var preparedMessages []ai.Message
+			if lastTurn != nil && a.prepareNextTurn != nil {
+				update, err := a.prepareNextTurn(ctx, cloneTurnContext(*lastTurn))
+				if err != nil {
+					return fail(fmt.Errorf("agent: prepare next turn: %w", err), !assistantEmitted)
+				}
+				preparedMessages, err = a.applyTurnUpdate(update, &currentContext, &model, &thinking)
+				if err != nil {
+					return fail(err, !assistantEmitted)
+				}
+			}
+			if lastTurn != nil && len(pending) == 0 {
+				pending = a.drainSteering()
+			}
+			a.emit(Event{Type: EventTurnStart, Step: result.Steps + 1})
+			for _, message := range append(preparedMessages, pending...) {
+				a.emitMessage(message, result.Steps+1)
+				currentContext.Messages = append(currentContext.Messages, ai.CloneMessage(message))
+				newMessages = append(newMessages, ai.CloneMessage(message))
+			}
+			pending = nil
+		}
+
+		if err := ctx.Err(); err != nil {
+			return fail(err, !assistantEmitted)
+		}
+		if a.maxSteps > 0 && result.Steps >= a.maxSteps {
+			return fail(ErrMaxSteps, !assistantEmitted)
+		}
+
+		requestContext := cloneAgentContext(currentContext)
+		if a.prepareRequest != nil {
+			update, err := a.prepareRequest(ctx, PrepareRequestContext{
+				Context:       cloneAgentContext(requestContext),
+				Model:         model,
+				ThinkingLevel: thinking,
+			})
+			if err != nil {
+				return fail(fmt.Errorf("agent: prepare request: %w", err), !assistantEmitted)
+			}
+			if err := a.applyRequestUpdate(update, &requestContext, &model, &thinking); err != nil {
+				return fail(err, !assistantEmitted)
+			}
+		}
+		// PrepareRequest replacements apply to this and later requests in the run.
+		// The persistent transcript still only receives messages emitted below.
+		currentContext = cloneAgentContext(requestContext)
+
+		requestMessages := ai.CloneMessages(requestContext.Messages)
+		if a.transformMessages != nil {
+			transformed, err := a.transformMessages(ctx, ai.CloneMessages(requestMessages))
+			if err != nil {
+				return fail(fmt.Errorf("agent: transform messages: %w", err), !assistantEmitted)
+			}
+			requestMessages = ai.CloneMessages(transformed)
+		}
+		specs, err := toolSpecs(requestContext.Tools)
+		if err != nil {
+			return fail(err, !assistantEmitted)
+		}
+
+		result.Steps++
+		assistant, stopReason, usage, streamErr := a.runModelTurn(
+			ctx,
+			result.Steps,
+			model,
+			requestMessages,
+			specs,
+			a.requestOptionsFor(thinking),
+		)
+		assistantEmitted = true
+		result.Usage.Add(usage)
+		result.StopReason = stopReason
+		result.Answer = assistant.Text()
+		if assistant.ErrorMessage != "" {
+			result.ErrorMessage = assistant.ErrorMessage
+		}
+		currentContext.Messages = append(currentContext.Messages, ai.CloneMessage(assistant))
+		newMessages = append(newMessages, ai.CloneMessage(assistant))
+
+		if streamErr != nil || stopReason == ai.StopReasonError || stopReason == ai.StopReasonAborted {
+			turn := TurnContext{
+				Message:     ai.CloneMessage(assistant),
+				ToolResults: nil,
+				Context:     cloneAgentContext(currentContext),
+				NewMessages: ai.CloneMessages(newMessages),
+			}
+			if a.finishTurn != nil {
+				if _, err := a.finishTurn(ctx, cloneTurnContext(turn)); err != nil {
+					a.emit(Event{Type: EventTurnEnd, Step: result.Steps, Message: &turn.Message})
+					return fail(fmt.Errorf("agent: finish turn: %w", err), false)
+				}
+			}
+			lastTurn = &turn
+			a.emit(Event{Type: EventTurnEnd, Step: result.Steps, Message: &turn.Message})
+			if streamErr != nil {
+				return fail(&ModelError{Message: assistant, Err: streamErr}, false)
+			}
+			if stopReason == ai.StopReasonAborted {
+				if err := ctx.Err(); err != nil {
+					return fail(err, false)
+				}
+				return fail(ErrAborted, false)
+			}
+			return fail(&ModelError{Message: assistant}, false)
+		}
+
+		calls := assistant.ToolCalls()
+		var toolResults []ai.Message
+		terminate := false
+		if len(calls) > 0 {
+			if stopReason == ai.StopReasonLength {
+				toolResults = a.failTruncatedToolCalls(calls, result.Steps)
+			} else {
+				toolResults, terminate = a.executeToolCalls(ctx, currentContext, assistant, calls, result.Steps)
+			}
+			for _, toolResult := range toolResults {
+				a.emitMessage(toolResult, result.Steps)
+				currentContext.Messages = append(currentContext.Messages, ai.CloneMessage(toolResult))
+				newMessages = append(newMessages, ai.CloneMessage(toolResult))
+			}
+		}
+
+		turn := TurnContext{
+			Message:     ai.CloneMessage(assistant),
+			ToolResults: ai.CloneMessages(toolResults),
+			Context:     cloneAgentContext(currentContext),
+			NewMessages: ai.CloneMessages(newMessages),
+		}
+		decision := TurnDefault
+		if a.finishTurn != nil {
+			decision, err = a.finishTurn(ctx, cloneTurnContext(turn))
+			if err != nil {
+				a.emit(Event{
+					Type:        EventTurnEnd,
+					Step:        result.Steps,
+					Message:     &turn.Message,
+					ToolResults: cloneToolResultSlice(turn.ToolResults),
+				})
+				return fail(fmt.Errorf("agent: finish turn: %w", err), false)
+			}
+		}
+		lastTurn = &turn
+		a.emit(Event{
+			Type:        EventTurnEnd,
+			Step:        result.Steps,
+			Message:     &turn.Message,
+			ToolResults: cloneToolResultSlice(turn.ToolResults),
+		})
+
+		if decision == TurnEnd {
+			return finish()
+		}
+		explicitContinuation = decision == TurnContinue
+		if len(calls) > 0 && !terminate {
+			explicitContinuation = false
+			continue
+		}
+		pending = a.drainSteering()
+		if len(pending) > 0 {
+			explicitContinuation = false
+			continue
+		}
+		followUp := a.drainFollowUp()
+		if len(followUp) > 0 {
+			pending = followUp
+			explicitContinuation = false
+			continue
+		}
+		if explicitContinuation {
+			explicitContinuation = false
+			continue
+		}
+		return finish()
+	}
+}
+
+func (a *Agent) applyRequestUpdate(
+	update *RequestUpdate,
+	context *AgentContext,
+	model *ai.Model,
+	thinking *ThinkingLevel,
+) error {
+	if update == nil {
+		return nil
+	}
+	if update.Context != nil {
+		*context = cloneAgentContext(*update.Context)
+	}
+	if update.Model != nil {
+		*model = update.Model
+	}
+	if update.ThinkingLevel != nil {
+		if !validThinkingLevel(*update.ThinkingLevel) {
+			return fmt.Errorf("agent: unsupported thinking level %q", *update.ThinkingLevel)
+		}
+		*thinking = *update.ThinkingLevel
+	}
+	return nil
+}
+
+func (a *Agent) applyTurnUpdate(
+	update *TurnUpdate,
+	context *AgentContext,
+	model *ai.Model,
+	thinking *ThinkingLevel,
+) ([]ai.Message, error) {
+	if update == nil {
+		return nil, nil
+	}
+	if update.Context != nil {
+		*context = cloneAgentContext(*update.Context)
+	}
+	if update.Model != nil {
+		*model = update.Model
+	}
+	if update.ThinkingLevel != nil {
+		if !validThinkingLevel(*update.ThinkingLevel) {
+			return nil, fmt.Errorf("agent: unsupported thinking level %q", *update.ThinkingLevel)
+		}
+		*thinking = *update.ThinkingLevel
+	}
+	return ai.CloneMessages(update.Messages), nil
+}
+
+func (a *Agent) finishResult(result Result) (Result, error) {
+	result.Messages = a.messagesCopy()
+	eventResult := cloneResult(result)
+	a.emit(Event{Type: EventAgentEnd, Step: result.Steps, Result: &eventResult})
+	return result, nil
+}
+
+func (a *Agent) failResult(result Result, err error, synthesize bool) (Result, error) {
+	if synthesize {
+		stopReason := ai.StopReasonError
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			stopReason = ai.StopReasonAborted
+		}
+		message := failedAssistantMessage(a.currentModel().Info(), time.Now(), stopReason, err)
+		step := result.Steps + 1
+		a.emitMessage(message, step)
+		result.NewMessages = append(result.NewMessages, ai.CloneMessage(message))
+		end := ai.CloneMessage(message)
+		a.emit(Event{Type: EventTurnEnd, Step: step, Message: &end})
+		result.StopReason = stopReason
+		if result.ErrorMessage == "" {
+			result.ErrorMessage = err.Error()
+		}
+	}
+	result.Messages = a.messagesCopy()
+	if result.ErrorMessage == "" && err != nil {
+		result.ErrorMessage = err.Error()
+	}
+	eventResult := cloneResult(result)
+	a.emit(Event{
+		Type:   EventAgentError,
+		Step:   result.Steps,
+		Result: &eventResult,
+		Err:    err,
+		Error:  err.Error(),
+	})
+	eventResult = cloneResult(result)
+	a.emit(Event{Type: EventAgentEnd, Step: result.Steps, Result: &eventResult})
+	return result, err
+}
+
+func (a *Agent) messagesCopy() []ai.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return ai.CloneMessages(a.messages)
 }
 
 func cloneResult(result Result) Result {
 	result.Messages = ai.CloneMessages(result.Messages)
 	return result
+}
+
+func cloneAgentContext(context AgentContext) AgentContext {
+	return AgentContext{
+		Messages: ai.CloneMessages(context.Messages),
+		Tools:    append([]Tool(nil), context.Tools...),
+	}
+}
+
+func cloneTurnContext(turn TurnContext) TurnContext {
+	return TurnContext{
+		Message:     ai.CloneMessage(turn.Message),
+		ToolResults: ai.CloneMessages(turn.ToolResults),
+		Context:     cloneAgentContext(turn.Context),
+		NewMessages: ai.CloneMessages(turn.NewMessages),
+	}
+}
+
+func cloneToolResultSlice(messages []ai.Message) []ToolResult {
+	results := make([]ToolResult, 0, len(messages))
+	for _, message := range messages {
+		result := ToolResult{
+			Content:           ai.CloneContentBlocks(message.Content),
+			Details:           ai.CloneRawMessage(message.Details),
+			StructuredContent: ai.CloneRawMessage(message.StructuredContent),
+			IsError:           message.IsError,
+		}
+		if message.Usage != nil {
+			usage := *message.Usage
+			result.Usage = &usage
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+func systemPromptFromMessages(messages []ai.Message) string {
+	for _, message := range messages {
+		if message.Role == ai.RoleSystem {
+			return message.Text()
+		}
+	}
+	return ""
 }

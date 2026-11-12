@@ -10,8 +10,9 @@ import (
 )
 
 type textBlock struct {
-	index int
-	text  strings.Builder
+	index     int
+	text      strings.Builder
+	signature string
 }
 
 type thinkingBlock struct {
@@ -25,6 +26,7 @@ type thinkingBlock struct {
 type toolBlock struct {
 	index          int
 	id             string
+	itemID         string
 	name           string
 	arguments      strings.Builder
 	argumentsError string
@@ -100,6 +102,15 @@ func (b *Builder) TextEnd(key, text string) ai.Event {
 	}
 }
 
+// SetTextMeta records provider replay metadata for one text block.
+func (b *Builder) SetTextMeta(key, signature string) {
+	block := b.ensureText(key)
+	if signature != "" {
+		block.signature = signature
+	}
+	b.syncText(block)
+}
+
 func (b *Builder) ThinkingStart(key string) ai.Event {
 	block := b.ensureThinking(key)
 	return ai.Event{
@@ -162,6 +173,15 @@ func (b *Builder) ToolStart(key, id, name string) ai.Event {
 	}
 }
 
+// SetToolItemID records the provider item id for one tool call.
+func (b *Builder) SetToolItemID(key, itemID string) {
+	block := b.ensureTool(key)
+	if itemID != "" {
+		block.itemID = itemID
+	}
+	b.syncTool(block)
+}
+
 func (b *Builder) ToolDelta(key, delta string) ai.Event {
 	block := b.ensureTool(key)
 	block.arguments.WriteString(delta)
@@ -194,6 +214,9 @@ func (b *Builder) ToolEnd(key string, final *ai.ToolCall) (ai.Event, error) {
 	if final != nil {
 		if final.ID != "" {
 			block.id = final.ID
+		}
+		if final.ItemID != "" {
+			block.itemID = final.ItemID
 		}
 		if final.Name != "" {
 			block.name = final.Name
@@ -335,15 +358,16 @@ func (b *Builder) ensureTool(key string) *toolBlock {
 
 func (b *Builder) syncText(block *textBlock) {
 	b.message.Content[block.index].Text = block.text.String()
+	b.message.Content[block.index].TextSignature = block.signature
 }
 
 func (b *Builder) syncThinking(block *thinkingBlock) {
 	b.message.Content[block.index] = ai.ContentBlock{
-		Type:      ai.BlockThinking,
-		Thinking:  block.thinking.String(),
-		Signature: block.signature,
-		ID:        block.id,
-		Redacted:  block.redacted,
+		Type:              ai.BlockThinking,
+		Thinking:          block.thinking.String(),
+		ThinkingSignature: block.signature,
+		ID:                block.id,
+		Redacted:          block.redacted,
 	}
 }
 
@@ -354,6 +378,7 @@ func (b *Builder) syncTool(block *toolBlock) {
 	}
 	b.message.Content[block.index].ToolCall = &ai.ToolCall{
 		ID:             block.id,
+		ItemID:         block.itemID,
 		Name:           block.name,
 		Arguments:      json.RawMessage(arguments),
 		ArgumentsError: block.argumentsError,

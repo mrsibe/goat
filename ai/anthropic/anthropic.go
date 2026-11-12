@@ -189,11 +189,11 @@ func convertMessages(messages []ai.Message) ([]anthropicsdk.TextBlockParam, []an
 					blocks = append(blocks, anthropicsdk.NewTextBlock(block.Text))
 				case ai.BlockThinking:
 					if block.Redacted {
-						blocks = append(blocks, anthropicsdk.NewRedactedThinkingBlock(block.Signature))
+						blocks = append(blocks, anthropicsdk.NewRedactedThinkingBlock(block.ThinkingSignature))
 						continue
 					}
 					blocks = append(blocks, anthropicsdk.NewThinkingBlock(
-						block.Signature,
+						block.ThinkingSignature,
 						block.Thinking,
 					))
 				case ai.BlockImage:

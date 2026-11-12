@@ -1,0 +1,52 @@
+package openai // import "github.com/mrsibe/goat/ai/openai"
+
+Package openai adapts OpenAI Chat Completions and Responses APIs to the ai model
+interface.
+
+TYPES
+
+type CompletionsProvider struct {
+	// Has unexported fields.
+}
+    CompletionsProvider implements ai.Model using Chat Completions streaming.
+
+func New(config Config) (*CompletionsProvider, error)
+    New creates a Chat Completions provider. It is equivalent to NewCompletions
+    and preserves the original GOAT entry point.
+
+func NewCompletions(config Config) (*CompletionsProvider, error)
+    NewCompletions creates an OpenAI-compatible Chat Completions provider.
+
+func (p *CompletionsProvider) Info() ai.ModelInfo
+
+func (p *CompletionsProvider) Stream(ctx context.Context, request ai.Request) (ai.Stream, error)
+
+type Config struct {
+	APIKey          string
+	BaseURL         string
+	Model           string
+	Provider        string
+	HTTPClient      *http.Client
+	MaxRetries      *int
+	ContextWindow   int
+	MaxOutputTokens int
+}
+    Config configures an OpenAI-compatible model. APIKey may be empty for local
+    servers that do not require authentication.
+
+type Provider = CompletionsProvider
+    Provider is the original name for a Chat Completions model. New code should
+    use CompletionsProvider or ResponsesProvider explicitly.
+
+type ResponsesProvider struct {
+	// Has unexported fields.
+}
+    ResponsesProvider implements ai.Model using the OpenAI Responses API.
+
+func NewResponses(config Config) (*ResponsesProvider, error)
+    NewResponses creates an OpenAI Responses provider.
+
+func (p *ResponsesProvider) Info() ai.ModelInfo
+
+func (p *ResponsesProvider) Stream(ctx context.Context, request ai.Request) (ai.Stream, error)
+

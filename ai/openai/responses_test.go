@@ -3,14 +3,13 @@ package openai_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/mrsibe/goat/ai"
+	"github.com/mrsibe/goat/ai/internal/modeltest"
 	"github.com/mrsibe/goat/ai/openai"
 )
 
@@ -34,30 +33,37 @@ func TestResponsesMapsHistoryToolsAndStreaming(t *testing.T) {
 		"response": map[string]any{"id": "resp_1"},
 	})
 	writeChunk(&responseBody, map[string]any{
-		"type": "response.output_text.delta", "sequence_number": 2,
+		"type": "response.output_item.added", "sequence_number": 2, "output_index": 0,
+		"item": map[string]any{
+			"id": "msg_1", "type": "message", "role": "assistant",
+			"status": "in_progress", "phase": "final_answer", "content": []any{},
+		},
+	})
+	writeChunk(&responseBody, map[string]any{
+		"type": "response.output_text.delta", "sequence_number": 3,
 		"item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "你好",
 	})
 	writeChunk(&responseBody, map[string]any{
-		"type": "response.output_text.done", "sequence_number": 3,
+		"type": "response.output_text.done", "sequence_number": 4,
 		"item_id": "msg_1", "output_index": 0, "content_index": 0, "text": "你好",
 	})
 	writeChunk(&responseBody, map[string]any{
-		"type": "response.output_item.added", "sequence_number": 4, "output_index": 1,
+		"type": "response.output_item.added", "sequence_number": 5, "output_index": 1,
 		"item": map[string]any{
 			"id": "fc_1", "type": "function_call", "call_id": "call_1",
 			"name": "get_weather", "arguments": "",
 		},
 	})
 	writeChunk(&responseBody, map[string]any{
-		"type": "response.function_call_arguments.delta", "sequence_number": 5,
+		"type": "response.function_call_arguments.delta", "sequence_number": 6,
 		"item_id": "fc_1", "output_index": 1, "delta": `{"city":"北京"}`,
 	})
 	writeChunk(&responseBody, map[string]any{
-		"type": "response.function_call_arguments.done", "sequence_number": 6,
+		"type": "response.function_call_arguments.done", "sequence_number": 7,
 		"item_id": "fc_1", "output_index": 1, "arguments": `{"city":"北京"}`,
 	})
 	writeChunk(&responseBody, map[string]any{
-		"type": "response.completed", "sequence_number": 7,
+		"type": "response.completed", "sequence_number": 8,
 		"response": map[string]any{
 			"id": "resp_1",
 			"output": []any{map[string]any{
@@ -105,17 +111,20 @@ func TestResponsesMapsHistoryToolsAndStreaming(t *testing.T) {
 		t.Fatalf("info = %+v", provider.Info())
 	}
 
-	call := ai.ToolCall{ID: "call_1", Name: "get_weather", Arguments: json.RawMessage(`{"city":"北京"}`)}
+	call := ai.ToolCall{
+		ID: "call_1", ItemID: "fc_prev", Name: "get_weather",
+		Arguments: json.RawMessage(`{"city":"北京"}`),
+	}
 	assistant := ai.Message{
 		Role: ai.RoleAssistant,
 		Content: []ai.ContentBlock{
-			{Type: ai.BlockText, Text: "checking"},
+			{Type: ai.BlockText, Text: "checking", TextSignature: `{"id":"msg_prev","phase":"final_answer"}`},
 			{Type: ai.BlockToolCall, ToolCall: &call},
 		},
 	}
 	maxTokens := 1024
 	temperature := 0.2
-	stream, err := provider.Stream(context.Background(), ai.Request{
+	collected, err := modeltest.Collect(context.Background(), provider, ai.Request{
 		Messages: []ai.Message{
 			ai.TextMessage(ai.RoleSystem, "sys"),
 			ai.TextMessage(ai.RoleUser, "hi"),
@@ -142,19 +151,7 @@ func TestResponsesMapsHistoryToolsAndStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stream.Close()
-
-	var events []ai.Event
-	for {
-		event, nextErr := stream.Next()
-		if errors.Is(nextErr, io.EOF) {
-			break
-		}
-		if nextErr != nil {
-			t.Fatal(nextErr)
-		}
-		events = append(events, event)
-	}
+	events := collected.Events
 	wantTypes := []ai.EventType{
 		ai.EventStart,
 		ai.EventTextStart,
@@ -166,13 +163,7 @@ func TestResponsesMapsHistoryToolsAndStreaming(t *testing.T) {
 		ai.EventUsage,
 		ai.EventDone,
 	}
-	gotTypes := make([]ai.EventType, len(events))
-	for i, event := range events {
-		gotTypes[i] = event.Type
-	}
-	if !reflect.DeepEqual(gotTypes, wantTypes) {
-		t.Fatalf("event types = %v, want %v (events: %+v)", gotTypes, wantTypes, events)
-	}
+	modeltest.AssertEventTypes(t, events, wantTypes)
 	if events[2].TextDelta != "你好" || events[2].ContentIndex != 0 {
 		t.Fatalf("text delta = %+v", events[2])
 	}
@@ -189,9 +180,12 @@ func TestResponsesMapsHistoryToolsAndStreaming(t *testing.T) {
 		t.Fatalf("done = %+v", events[8])
 	}
 	calls := events[8].Message.ToolCalls()
-	if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].Name != "get_weather" ||
+	if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].ItemID != "fc_1" || calls[0].Name != "get_weather" ||
 		string(calls[0].Arguments) != `{"city":"北京"}` {
 		t.Fatalf("done tool calls = %+v", calls)
+	}
+	if got := events[8].Message.Content[0].TextSignature; got != `{"id":"msg_1","phase":"final_answer"}` {
+		t.Fatalf("text signature = %q", got)
 	}
 
 	captured := <-requests
@@ -209,11 +203,13 @@ func TestResponsesMapsHistoryToolsAndStreaming(t *testing.T) {
 	if len(body.Input) != 4 {
 		t.Fatalf("input = %+v", body.Input)
 	}
-	if body.Input[0]["role"] != "user" || body.Input[1]["role"] != "assistant" {
+	if body.Input[0]["role"] != "user" || body.Input[1]["role"] != "assistant" ||
+		body.Input[1]["type"] != "message" || body.Input[1]["id"] != "msg_prev" ||
+		body.Input[1]["phase"] != "final_answer" {
 		t.Fatalf("message input = %+v", body.Input)
 	}
 	if body.Input[2]["type"] != "function_call" || body.Input[2]["call_id"] != "call_1" ||
-		body.Input[2]["name"] != "get_weather" {
+		body.Input[2]["name"] != "get_weather" || body.Input[2]["id"] != "fc_prev" {
 		t.Fatalf("function call input = %+v", body.Input[2])
 	}
 	if body.Input[3]["type"] != "function_call_output" || body.Input[3]["call_id"] != "call_1" {

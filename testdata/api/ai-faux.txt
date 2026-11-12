@@ -1,0 +1,32 @@
+package faux // import "github.com/mrsibe/goat/ai/faux"
+
+Package faux provides a deterministic scripted model for tests.
+
+Stability: this package is test-only and is not covered by the v1.0 public API
+compatibility promise.
+
+TYPES
+
+type Model struct {
+	ModelInfo ai.ModelInfo
+	Turns     []Turn
+	Requests  []ai.Request
+}
+    Model returns pre-scripted turns and records requests.
+
+func New(turns ...Turn) *Model
+    New creates a scripted model.
+
+func (m *Model) Info() ai.ModelInfo
+    Info implements ai.Model.
+
+func (m *Model) Stream(_ context.Context, request ai.Request) (ai.Stream, error)
+    Stream implements ai.Model.
+
+type Turn struct {
+	Events    []ai.Event
+	StartErr  error
+	StreamErr error
+}
+    Turn is one scripted model response.
+

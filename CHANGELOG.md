@@ -3,6 +3,88 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 和
 [语义化版本](https://semver.org/lang/zh-CN/)。v0.x 阶段允许破坏性变更。
 
+## [0.4.0] - 2026-11-12
+
+### Added
+
+- `Result.NewMessages`：本次 run 新增的消息；`Result.Messages` 继续表示完整
+  transcript。
+- `ai.ToolCall.ItemID`：保留 OpenAI Responses 的 function-call item id。
+- OpenAI Responses 回放元数据：assistant message id、phase、text signature 和
+  function-call item id 的往返。
+- `agent/conformance_test.go` 语义一致性矩阵，覆盖生命周期事件配对、队列、
+  工具、错误和 transcript 形状。
+- `ai/internal/modeltest` 共享适配器流契约测试，并接入 OpenAI Completions、
+  OpenAI Responses 和 Anthropic Messages 主流程测试。
+- `scripts/api-snapshot.sh` 和 `testdata/api/*.txt` 导出 API 快照检查。
+- `STABILITY.md` 和 `COMPATIBILITY.md`，明确 v1.0 冻结范围和与 pi 的有意差异。
+
+### Changed
+
+- v0.4 定位为 v1.0 前的稳定化版本；不新增 provider、TUI、durable、MCP 或
+  coding-agent 功能。
+- `ai`、`agent` 增加包级稳定性说明；`ai/faux` 标记为测试专用包。
+- `goding` 仍使用 v0.2 的 `Session`/`ai.ToolSpec` API，需要单独迁移到
+  v0.3+ 的状态化 Agent 与 `agent.ToolSpec`；该迁移不在本仓库内完成。
+
+### Fixed
+
+- OpenAI Responses assistant 文本和工具调用不再丢失可回放的 provider item 元数据。
+- 失败合成 assistant 消息现在也会进入 `Result.NewMessages`。
+
+## [0.3.0] - 2026-11-12
+
+> v0.3.0 未单独发布；其变更包含在 v0.4.0 中。
+
+### Added
+
+- `agent.Agent` 改为状态化运行时，新增 `Prompt`、`PromptMessages`、
+  `Continue`、`Steer`、`FollowUp`、`Abort`、`WaitForIdle`、`Reset`、
+  `State`、`Subscribe` 和状态修改方法。
+- 新增 steering / follow-up 输入队列，以及 `QueueAll` /
+  `QueueOneAtATime` 两种消费模式。
+- 新增 `PrepareRequest`、`PrepareNextTurn`、`FinishTurn` 生命周期钩子。
+- 新增 `ToolSpec` 运行时提示：`Label`、`OutputSchema`、
+  `ExecutionMode` 和 `PrepareArguments`。
+- 新增 `StreamingTool`、`NewStreamingTool`、`EventToolUpdate` 和工具执行耗时。
+- 新增工具结果 `Details`、`StructuredContent`、`Usage`、`Terminate`。
+- 新增 `ai.RetryPolicy`、`ai.Retry`、`ai.RetryDelay` 和 `ai.IsRetryable`。
+- 新增消息运行时元数据：`Timestamp`、`Provider`、`Model`、`API`、
+  `StopReason`、`ErrorMessage`、`DurationMs`、`Usage`。
+- 新增 `ThinkingSignature`、`TextSignature`、`ThoughtSignature` 和
+  `Namespace`。
+
+### Changed
+
+- `MaxSteps` 默认值改为 0，表示不限制。
+- `ToolExecution` 默认值改为并行。
+- 输出长度截断且存在工具调用时，不再直接失败，而是为每个调用写入错误
+  observation 后继续。
+- provider 错误改为返回 `*agent.ModelError`，同时保留完整 transcript 和事件。
+- `Subscribe` 回调按注册顺序同步执行，并计入 run 完成时间。
+
+### Removed
+
+- 删除不可变 `Agent` + `Session` 模型：`NewSession`、
+  `NewSessionWithHistory`、`Session`、`WithOnEvent` 和 `WithRequestOptions`。
+- 删除 `ErrModelStop` 和 `ErrOutputLimit`。
+
+### Fixed
+
+- 并行工具 `tool_end` 按完成顺序发出，tool result 消息仍按模型调用顺序持久化。
+- 工具流式 update 在执行结束后不再进入事件流，并且 run 会等待已在途的
+  update 完成后再发出 `tool_end` / `agent_end`。
+- 并行工具现在先完成全部参数校验和 `BeforeToolCall` 预检，再统一并发执行。
+- `Continue` 在 busy 时先返回 `ErrBusy`，不再提前消费 steering / follow-up
+  队列。
+- run 开始时也会检查 steering 队列，`Prompt` 前排队的 steering 会进入首次请求。
+- `AfterToolCall` 替换 `Content` 且未提供 `StructuredContent` 时会清除旧值。
+- 未产生 assistant 消息的 run 失败（如 `PrepareRequest`、`TransformMessages`、
+  `MaxSteps`）会补发失败 assistant 消息和 `turn_end`，再发出 `agent_error` /
+  `agent_end`。
+- 流式 `message_delta` / thinking 事件会同步更新 `State.StreamingMessage`。
+- 工具结果 details、structured content、usage 和 duration 不再丢失。
+
 ## [0.2.0] - 2026-11-09
 
 ### Added

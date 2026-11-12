@@ -10,7 +10,7 @@ import (
 	"github.com/mrsibe/goat/ai"
 )
 
-var weatherTool = agent.NewTextTool(ai.ToolSpec{
+var weatherTool = agent.NewTextTool(agent.ToolSpec{
 	Name:        "get_weather",
 	Description: "查询指定城市的实时天气",
 	Parameters: map[string]any{

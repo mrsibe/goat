@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/mrsibe/goat/ai"
 	"github.com/mrsibe/goat/ai/anthropic"
+	"github.com/mrsibe/goat/ai/internal/modeltest"
 )
 
 type capturedRequest struct {
@@ -140,7 +140,7 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 			{Type: ai.BlockToolCall, ToolCall: &call},
 		},
 	}
-	stream, err := provider.Stream(context.Background(), ai.Request{
+	collected, err := modeltest.Collect(context.Background(), provider, ai.Request{
 		Messages: []ai.Message{
 			ai.TextMessage(ai.RoleSystem, "sys"),
 			ai.TextMessage(ai.RoleUser, "hi"),
@@ -169,19 +169,7 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stream.Close()
-
-	var events []ai.Event
-	for {
-		event, nextErr := stream.Next()
-		if errors.Is(nextErr, io.EOF) {
-			break
-		}
-		if nextErr != nil {
-			t.Fatal(nextErr)
-		}
-		events = append(events, event)
-	}
+	events := collected.Events
 	wantTypes := []ai.EventType{
 		ai.EventStart,
 		ai.EventTextStart,
@@ -194,13 +182,7 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 		ai.EventUsage,
 		ai.EventDone,
 	}
-	gotTypes := make([]ai.EventType, len(events))
-	for i, event := range events {
-		gotTypes[i] = event.Type
-	}
-	if !reflect.DeepEqual(gotTypes, wantTypes) {
-		t.Fatalf("event types = %v, want %v (events: %+v)", gotTypes, wantTypes, events)
-	}
+	modeltest.AssertEventTypes(t, events, wantTypes)
 	if events[2].TextDelta != "你好" || events[2].ContentIndex != 0 {
 		t.Fatalf("text delta = %+v", events[2])
 	}
@@ -340,7 +322,7 @@ func TestProviderMapsThinkingAndImages(t *testing.T) {
 			{
 				Role: ai.RoleAssistant,
 				Content: []ai.ContentBlock{
-					{Type: ai.BlockThinking, Thinking: "plan", Signature: "sig"},
+					{Type: ai.BlockThinking, Thinking: "plan", ThinkingSignature: "sig"},
 					{Type: ai.BlockText, Text: "taking a screenshot"},
 					{Type: ai.BlockToolCall, ToolCall: &call},
 				},

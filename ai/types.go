@@ -1,10 +1,9 @@
-// Package ai defines the provider-neutral message, tool, request, and streaming
-// contracts used by the agent runtime.
 package ai
 
 import (
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 // Role identifies the author of a message.
@@ -36,40 +35,57 @@ type ImageContent struct {
 
 // ToolCall is a completed tool invocation requested by the model.
 type ToolCall struct {
-	ID             string          `json:"id"`
-	Name           string          `json:"name"`
-	Arguments      json.RawMessage `json:"arguments"`
-	ArgumentsError string          `json:"arguments_error,omitempty"`
+	ID               string          `json:"id"`
+	ItemID           string          `json:"item_id,omitempty"`
+	Name             string          `json:"name"`
+	Arguments        json.RawMessage `json:"arguments"`
+	ArgumentsError   string          `json:"arguments_error,omitempty"`
+	ThoughtSignature string          `json:"thought_signature,omitempty"`
+	Namespace        string          `json:"namespace,omitempty"`
 }
 
 // ContentBlock is one piece of provider-neutral message content.
 type ContentBlock struct {
-	Type      BlockType     `json:"type"`
-	Text      string        `json:"text,omitempty"`
-	Thinking  string        `json:"thinking,omitempty"`
-	Signature string        `json:"signature,omitempty"`
-	ID        string        `json:"id,omitempty"`
-	Redacted  bool          `json:"redacted,omitempty"`
-	Image     *ImageContent `json:"image,omitempty"`
-	ToolCall  *ToolCall     `json:"tool_call,omitempty"`
+	Type              BlockType     `json:"type"`
+	Text              string        `json:"text,omitempty"`
+	TextSignature     string        `json:"text_signature,omitempty"`
+	Thinking          string        `json:"thinking,omitempty"`
+	ThinkingSignature string        `json:"thinking_signature,omitempty"`
+	ID                string        `json:"id,omitempty"`
+	Redacted          bool          `json:"redacted,omitempty"`
+	Image             *ImageContent `json:"image,omitempty"`
+	ToolCall          *ToolCall     `json:"tool_call,omitempty"`
 }
 
 // Message is a provider-neutral chat message. Assistant messages use tool-call
 // blocks for model-requested tools; tool messages use ToolCallID to correlate
 // the result with its request.
 type Message struct {
-	Role       Role           `json:"role"`
-	Content    []ContentBlock `json:"content"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	ToolName   string         `json:"tool_name,omitempty"`
-	IsError    bool           `json:"is_error,omitempty"`
+	Role              Role            `json:"role"`
+	Content           []ContentBlock  `json:"content"`
+	ToolCallID        string          `json:"tool_call_id,omitempty"`
+	ToolName          string          `json:"tool_name,omitempty"`
+	IsError           bool            `json:"is_error,omitempty"`
+	Timestamp         int64           `json:"timestamp,omitempty"`
+	Details           json.RawMessage `json:"details,omitempty"`
+	StructuredContent json.RawMessage `json:"structured_content,omitempty"`
+	Usage             *Usage          `json:"usage,omitempty"`
+	StopReason        StopReason      `json:"stop_reason,omitempty"`
+	Provider          string          `json:"provider,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	API               API             `json:"api,omitempty"`
+	ResponseModel     string          `json:"response_model,omitempty"`
+	ResponseID        string          `json:"response_id,omitempty"`
+	ErrorMessage      string          `json:"error_message,omitempty"`
+	DurationMs        int64           `json:"duration_ms,omitempty"`
 }
 
 // TextMessage creates a message containing one text block.
 func TextMessage(role Role, text string) Message {
 	return Message{
-		Role:    role,
-		Content: []ContentBlock{{Type: BlockText, Text: text}},
+		Role:      role,
+		Content:   []ContentBlock{{Type: BlockText, Text: text}},
+		Timestamp: time.Now().UnixMilli(),
 	}
 }
 
@@ -96,6 +112,7 @@ func ToolResultMessage(callID, toolName string, content []ContentBlock, isError 
 		ToolCallID: callID,
 		ToolName:   toolName,
 		IsError:    isError,
+		Timestamp:  time.Now().UnixMilli(),
 	}
 }
 
@@ -178,6 +195,14 @@ func CloneToolCall(call ToolCall) ToolCall {
 	return call
 }
 
+// CloneRawMessage deep-copies a JSON payload.
+func CloneRawMessage(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
+}
+
 // CloneContentBlock deep-copies a content block.
 func CloneContentBlock(block ContentBlock) ContentBlock {
 	if block.ToolCall != nil {
@@ -207,6 +232,12 @@ func CloneContentBlocks(blocks []ContentBlock) []ContentBlock {
 func CloneMessage(message Message) Message {
 	cloned := message
 	cloned.Content = CloneContentBlocks(message.Content)
+	cloned.Details = CloneRawMessage(message.Details)
+	cloned.StructuredContent = CloneRawMessage(message.StructuredContent)
+	if message.Usage != nil {
+		usage := *message.Usage
+		cloned.Usage = &usage
+	}
 	return cloned
 }
 

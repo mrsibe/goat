@@ -54,3 +54,23 @@ func TestBuilderPreservesInvalidFinalToolArgumentsAsObservation(t *testing.T) {
 		t.Fatal("invalid JSON was not preserved as ArgumentsError")
 	}
 }
+
+func TestBuilderPreservesProviderReplayMetadata(t *testing.T) {
+	builder := New(ai.ModelInfo{API: ai.APIOpenAIResponses})
+	builder.Start()
+	builder.TextDelta("text:msg_1:0", "hello")
+	builder.SetTextMeta("text:msg_1:0", `{"id":"msg_1","phase":"final_answer"}`)
+	builder.SetToolItemID("tool:fc_1", "fc_1")
+	builder.ToolStart("tool:fc_1", "call_1", "echo")
+
+	message := builder.Message()
+	if len(message.Content) != 2 {
+		t.Fatalf("content = %+v", message.Content)
+	}
+	if got := message.Content[0].TextSignature; got != `{"id":"msg_1","phase":"final_answer"}` {
+		t.Fatalf("text signature = %q", got)
+	}
+	if call := message.Content[1].ToolCall; call == nil || call.ID != "call_1" || call.ItemID != "fc_1" {
+		t.Fatalf("tool call = %+v", call)
+	}
+}

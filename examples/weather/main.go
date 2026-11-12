@@ -55,7 +55,7 @@ func run() error {
 
 	lastStep := 0
 	streamed := false
-	result, err := assistant.Run(ctx, "北京今天适合户外活动吗？", agent.WithOnEvent(func(event agent.Event) {
+	assistant.Subscribe(func(event agent.Event) {
 		switch event.Type {
 		case agent.EventMessageDelta:
 			if event.Step != lastStep {
@@ -75,7 +75,8 @@ func run() error {
 			}
 			fmt.Println()
 		}
-	}))
+	})
+	result, err := assistant.Prompt(ctx, "北京今天适合户外活动吗？")
 	if err != nil {
 		return err
 	}

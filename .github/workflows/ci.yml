@@ -30,6 +30,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Check exported API snapshots
+        run: bash scripts/api-snapshot.sh
+
       - name: Test
         run: go test ./...
 
