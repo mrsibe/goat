@@ -24,9 +24,11 @@ const defaultMaxTokens int64 = 4096
 // Config configures an Anthropic Messages model.
 type Config struct {
 	APIKey          string
+	AuthToken       string
 	BaseURL         string
 	Model           string
 	Provider        string
+	Headers         map[string]string
 	HTTPClient      *http.Client
 	MaxRetries      *int
 	ContextWindow   int
@@ -45,9 +47,14 @@ func New(config Config) (*Provider, error) {
 	if strings.TrimSpace(config.Model) == "" {
 		return nil, errors.New("anthropic: model must not be empty")
 	}
+	if config.APIKey != "" && config.AuthToken != "" {
+		return nil, errors.New("anthropic: set only one of API key or auth token")
+	}
 
 	var options []option.RequestOption
-	if config.APIKey != "" {
+	if config.AuthToken != "" {
+		options = append(options, option.WithAuthToken(config.AuthToken))
+	} else if config.APIKey != "" {
 		options = append(options, option.WithAPIKey(config.APIKey))
 	}
 	if config.BaseURL != "" {
@@ -58,6 +65,15 @@ func New(config Config) (*Provider, error) {
 	}
 	if config.MaxRetries != nil {
 		options = append(options, option.WithMaxRetries(*config.MaxRetries))
+	}
+	for key, value := range config.Headers {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		options = append(options, option.WithHeader(key, value))
+	}
+	if config.AuthToken != "" {
+		options = append(options, option.WithHeaderDel("x-api-key"))
 	}
 
 	provider := strings.TrimSpace(config.Provider)

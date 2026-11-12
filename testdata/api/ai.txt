@@ -30,9 +30,11 @@ type API string
     API identifies a provider protocol.
 
 const (
-	APIOpenAICompletions API = "openai-completions"
-	APIOpenAIResponses   API = "openai-responses"
-	APIAnthropicMessages API = "anthropic-messages"
+	APIOpenAICompletions    API = "openai-completions"
+	APIOpenAIResponses      API = "openai-responses"
+	APIAzureOpenAIResponses API = "azure-openai-responses"
+	APIGoogleGenerativeAI   API = "google-generative-ai"
+	APIAnthropicMessages    API = "anthropic-messages"
 )
 type APIError struct {
 	Provider   string

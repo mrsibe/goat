@@ -3,6 +3,47 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 和
 [语义化版本](https://semver.org/lang/zh-CN/)。v0.x 阶段允许破坏性变更。
 
+## [Unreleased]
+
+## [0.5.0] - 2026-11-12
+
+### Added
+
+- `ai/azure`：Azure OpenAI v1 适配器，提供 `NewCompletions` 和 `NewResponses`。
+  自动解析资源端点、注入 `api-key` 头和 `api-version` 查询参数，并复用
+  `ai/openai` 的消息与流式转换。
+- `ai/google`：Google Gemini 适配器，基于官方 `google.golang.org/genai` SDK。
+  支持文本、thinking、thought signature、函数调用、图片输入/工具结果图片、
+  usage 和 stop reason 映射。
+- `ai/openrouter`：OpenRouter Chat Completions 与 Anthropic Messages 适配器，
+  支持 Bearer 鉴权、`OPENROUTER_API_KEY` 回退和 OpenRouter reasoning 格式。
+- `ai/deepseek`：DeepSeek Chat Completions 适配器，支持 `DEEPSEEK_API_KEY`
+  回退、thinking 请求参数和 `reasoning_content` 历史回放。
+- `ai/xai`：xAI Responses 适配器，支持 `XAI_API_KEY` 回退和 encrypted
+  reasoning 内容。
+- `openai.Config.ReasoningFormat` 和 `openai.Config.SupportsThinking`：为
+  OpenAI 兼容 Chat Completions 端点选择 reasoning 请求/回放格式。
+- Chat Completions 流现在识别 `reasoning_content`、`reasoning`、
+  `reasoning_text` 和 OpenRouter `reasoning_details`，并生成 thinking 事件。
+- `anthropic.Config.AuthToken`：使用 Bearer 鉴权，并阻止环境 API Key 同时发送
+  `x-api-key`。
+- `openai.Config.Query`：为请求附加查询参数，供 Azure 等兼容端点使用。
+- `openai.Config.DisableEnvAuth`：阻止 SDK 从 `OPENAI_API_KEY` 注入
+  `Authorization`，供使用其他鉴权头的适配器复用 OpenAI 协议实现。
+- `ai.APIAzureOpenAIResponses` 和 `ai.APIGoogleGenerativeAI` API 标识。
+- `openai.Config.Headers` 和 `anthropic.Config.Headers`：为兼容端点传递自定义
+  HTTP header，支持 OpenRouter、网关鉴权和供应商路由头。
+- README 增加 DeepSeek、Groq、Together、OpenRouter、Cerebras、Hugging Face、
+  NVIDIA、Moonshot、Z.AI、Kimi、xAI、MiniMax 和 Vercel AI Gateway 等兼容端点
+  的接入示例。
+
+### Fixed
+
+- 流式工具调用现在保留 `ai.ToolCall.ThoughtSignature`，确保 Gemini 的
+  thought signature 能随 assistant 历史回放。
+- Responses 请求的 `max_output_tokens` 低于 16 时自动提升到 16，避免
+  OpenAI/Azure 拒绝过小的输出上限。
+
 ## [0.4.1] - 2026-11-12
 
 ### Added

@@ -6,9 +6,11 @@ import "context"
 type API string
 
 const (
-	APIOpenAICompletions API = "openai-completions"
-	APIOpenAIResponses   API = "openai-responses"
-	APIAnthropicMessages API = "anthropic-messages"
+	APIOpenAICompletions    API = "openai-completions"
+	APIOpenAIResponses      API = "openai-responses"
+	APIAzureOpenAIResponses API = "azure-openai-responses"
+	APIGoogleGenerativeAI   API = "google-generative-ai"
+	APIAnthropicMessages    API = "anthropic-messages"
 )
 
 // ModelInfo describes a concrete model and the protocol capabilities exposed

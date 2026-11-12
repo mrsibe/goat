@@ -8,7 +8,12 @@ packages=(
   "ai"
   "agent"
   "ai/openai"
+  "ai/azure"
+  "ai/google"
   "ai/anthropic"
+  "ai/openrouter"
+  "ai/deepseek"
+  "ai/xai"
   "ai/faux"
 )
 

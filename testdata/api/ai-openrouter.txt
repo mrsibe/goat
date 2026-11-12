@@ -1,0 +1,36 @@
+package openrouter // import "github.com/mrsibe/goat/ai/openrouter"
+
+Package openrouter adapts OpenRouter's OpenAI-compatible Chat Completions and
+Anthropic-compatible Messages endpoints to the ai model interface.
+
+CONSTANTS
+
+const DefaultBaseURL = "https://openrouter.ai/api/v1"
+    DefaultBaseURL is the OpenRouter API base URL.
+
+
+FUNCTIONS
+
+func NewCompletions(config Config) (*openai.CompletionsProvider, error)
+    NewCompletions creates an OpenRouter Chat Completions provider.
+
+func NewMessages(config Config) (*anthropic.Provider, error)
+    NewMessages creates an OpenRouter Anthropic Messages provider.
+
+
+TYPES
+
+type Config struct {
+	APIKey          string
+	BaseURL         string
+	Model           string
+	Provider        string
+	Headers         map[string]string
+	HTTPClient      *http.Client
+	MaxRetries      *int
+	ContextWindow   int
+	MaxOutputTokens int
+}
+    Config configures an OpenRouter model. APIKey falls back to
+    OPENROUTER_API_KEY when empty.
+

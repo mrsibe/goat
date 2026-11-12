@@ -30,6 +30,7 @@ type toolBlock struct {
 	name           string
 	arguments      strings.Builder
 	argumentsError string
+	signature      string
 }
 
 // Builder accumulates one assistant stream and emits normalized ai.Event
@@ -228,6 +229,9 @@ func (b *Builder) ToolEnd(key string, final *ai.ToolCall) (ai.Event, error) {
 		if final.ArgumentsError != "" {
 			block.argumentsError = final.ArgumentsError
 		}
+		if final.ThoughtSignature != "" {
+			block.signature = final.ThoughtSignature
+		}
 	}
 	if block.name == "" {
 		return ai.Event{}, fmt.Errorf("tool call at content index %d is missing a name", block.index)
@@ -377,11 +381,12 @@ func (b *Builder) syncTool(block *toolBlock) {
 		arguments = "{}"
 	}
 	b.message.Content[block.index].ToolCall = &ai.ToolCall{
-		ID:             block.id,
-		ItemID:         block.itemID,
-		Name:           block.name,
-		Arguments:      json.RawMessage(arguments),
-		ArgumentsError: block.argumentsError,
+		ID:               block.id,
+		ItemID:           block.itemID,
+		Name:             block.name,
+		Arguments:        json.RawMessage(arguments),
+		ArgumentsError:   block.argumentsError,
+		ThoughtSignature: block.signature,
 	}
 }
 

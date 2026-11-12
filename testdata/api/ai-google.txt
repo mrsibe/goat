@@ -1,0 +1,39 @@
+package google // import "github.com/mrsibe/goat/ai/google"
+
+Package google adapts the Google Gemini API to the ai model interface.
+
+It uses the official google.golang.org/genai SDK and maps Gemini content,
+function calls, thought signatures, usage metadata, and streaming events to
+GOAT's provider-neutral model contract.
+
+TYPES
+
+type Config struct {
+	APIKey          string
+	BaseURL         string
+	Model           string
+	Provider        string
+	Headers         map[string]string
+	HTTPClient      *http.Client
+	MaxRetries      *int
+	ContextWindow   int
+	MaxOutputTokens int
+}
+    Config configures a Gemini API model. BaseURL is optional
+    and should include the API version path when set (for example
+    https://proxy.example.com/v1beta).
+
+type Provider struct {
+	// Has unexported fields.
+}
+    Provider implements ai.Model using Gemini streaming generation.
+
+func New(config Config) (*Provider, error)
+    New creates a Gemini API provider.
+
+func (p *Provider) Info() ai.ModelInfo
+    Info implements ai.Model.
+
+func (p *Provider) Stream(ctx context.Context, request ai.Request) (ai.Stream, error)
+    Stream starts one streamed Gemini generation request.
+

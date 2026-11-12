@@ -355,6 +355,46 @@ func TestCompletionsRejectsImageToolResults(t *testing.T) {
 	}
 }
 
+func TestProviderSendsCustomHeaders(t *testing.T) {
+	headersCh := make(chan http.Header, 1)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		headersCh <- request.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+			Request:    request,
+		}, nil
+	})}
+
+	provider, err := openai.New(openai.Config{
+		BaseURL:    "https://example.test",
+		Model:      "test-model",
+		Provider:   "compatible",
+		Headers:    map[string]string{"X-Goat-Test": "openai"},
+		HTTPClient: client,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := provider.Stream(context.Background(), ai.Request{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hi")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainStream(t, stream)
+
+	headers := <-headersCh
+	if got := headers.Get("X-Goat-Test"); got != "openai" {
+		t.Fatalf("X-Goat-Test = %q", got)
+	}
+	if got := provider.Info().Provider; got != "compatible" {
+		t.Fatalf("provider = %q", got)
+	}
+}
+
 func writeChunk(writer io.Writer, chunk map[string]any) {
 	data, err := json.Marshal(chunk)
 	if err != nil {

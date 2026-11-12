@@ -7,9 +7,11 @@ TYPES
 
 type Config struct {
 	APIKey          string
+	AuthToken       string
 	BaseURL         string
 	Model           string
 	Provider        string
+	Headers         map[string]string
 	HTTPClient      *http.Client
 	MaxRetries      *int
 	ContextWindow   int

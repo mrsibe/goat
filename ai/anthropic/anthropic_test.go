@@ -373,6 +373,63 @@ func TestProviderMapsThinkingAndImages(t *testing.T) {
 	}
 }
 
+func TestProviderSendsCustomHeaders(t *testing.T) {
+	headersCh := make(chan http.Header, 1)
+	var responseBody strings.Builder
+	writeSSE(&responseBody, map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-test",
+			"content": []any{},
+			"usage":   map[string]any{"input_tokens": 1, "output_tokens": 1},
+		},
+	})
+	writeSSE(&responseBody, map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": "end_turn"},
+		"usage": map[string]any{"output_tokens": 1},
+	})
+	writeSSE(&responseBody, map[string]any{"type": "message_stop"})
+
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		headersCh <- request.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(responseBody.String())),
+			Request:    request,
+		}, nil
+	})}
+
+	provider, err := anthropic.New(anthropic.Config{
+		APIKey:     "test-key",
+		BaseURL:    "https://example.test",
+		Model:      "claude-test",
+		Provider:   "anthropic-compatible",
+		Headers:    map[string]string{"X-Goat-Test": "anthropic"},
+		HTTPClient: client,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := provider.Stream(context.Background(), ai.Request{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hi")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainStream(t, stream)
+
+	headers := <-headersCh
+	if got := headers.Get("X-Goat-Test"); got != "anthropic" {
+		t.Fatalf("X-Goat-Test = %q", got)
+	}
+	if got := provider.Info().Provider; got != "anthropic-compatible" {
+		t.Fatalf("provider = %q", got)
+	}
+}
+
 func writeSSE(writer io.Writer, event map[string]any) {
 	data, err := json.Marshal(event)
 	if err != nil {

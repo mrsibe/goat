@@ -22,10 +22,18 @@ func (p *CompletionsProvider) Info() ai.ModelInfo
 func (p *CompletionsProvider) Stream(ctx context.Context, request ai.Request) (ai.Stream, error)
 
 type Config struct {
-	APIKey          string
-	BaseURL         string
-	Model           string
-	Provider        string
+	APIKey           string
+	BaseURL          string
+	Model            string
+	Provider         string
+	Headers          map[string]string
+	Query            map[string]string
+	ReasoningFormat  ReasoningFormat
+	SupportsThinking bool
+	// DisableEnvAuth prevents the SDK from reading OPENAI_API_KEY from the
+	// environment. Adapters that authenticate with another header use this to
+	// avoid sending an unrelated Authorization header.
+	DisableEnvAuth  bool
 	HTTPClient      *http.Client
 	MaxRetries      *int
 	ContextWindow   int
@@ -38,6 +46,20 @@ type Provider = CompletionsProvider
     Provider is the original name for a Chat Completions model. New code should
     use CompletionsProvider or ResponsesProvider explicitly.
 
+type ReasoningFormat string
+    ReasoningFormat selects the request and replay wire format used by
+    OpenAI-compatible Chat Completions endpoints.
+
+const (
+	// ReasoningFormatOpenAI uses the standard top-level reasoning_effort field.
+	ReasoningFormatOpenAI ReasoningFormat = "openai"
+	// ReasoningFormatDeepSeek uses DeepSeek's thinking object and
+	// reasoning_content replay field.
+	ReasoningFormatDeepSeek ReasoningFormat = "deepseek"
+	// ReasoningFormatOpenRouter uses OpenRouter's nested reasoning object and
+	// reasoning_details replay metadata.
+	ReasoningFormatOpenRouter ReasoningFormat = "openrouter"
+)
 type ResponsesProvider struct {
 	// Has unexported fields.
 }

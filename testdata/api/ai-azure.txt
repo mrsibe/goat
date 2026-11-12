@@ -1,0 +1,56 @@
+package azure // import "github.com/mrsibe/goat/ai/azure"
+
+Package azure adapts Azure OpenAI deployments to the ai model interface.
+
+Azure's v1 API is OpenAI-compatible, so this package reuses the Chat
+Completions and Responses adapters from ai/openai. It resolves Azure endpoints,
+authenticates with the api-key header, and adds the api-version query parameter.
+
+CONSTANTS
+
+const DefaultAPIVersion = "v1"
+    DefaultAPIVersion is the Azure OpenAI API version used when APIVersion is
+    empty.
+
+
+FUNCTIONS
+
+func NewCompletions(config Config) (*openai.CompletionsProvider, error)
+    NewCompletions creates an Azure OpenAI Chat Completions provider.
+
+
+TYPES
+
+type Config struct {
+	APIKey          string
+	Endpoint        string
+	ResourceName    string
+	APIVersion      string
+	Model           string
+	Deployment      string
+	Provider        string
+	Headers         map[string]string
+	HTTPClient      *http.Client
+	MaxRetries      *int
+	ContextWindow   int
+	MaxOutputTokens int
+}
+    Config configures an Azure OpenAI model. Endpoint takes precedence over
+    ResourceName. Deployment takes precedence over Model; Model is otherwise
+    treated as the deployment name.
+
+type ResponsesProvider struct {
+	*openai.ResponsesProvider
+}
+    ResponsesProvider is an Azure OpenAI Responses model. It reports the Azure
+    Responses API while sharing streaming and message conversion with ai/openai.
+
+func NewResponses(config Config) (*ResponsesProvider, error)
+    NewResponses creates an Azure OpenAI Responses provider.
+
+func (p *ResponsesProvider) Info() ai.ModelInfo
+    Info returns the Azure model metadata.
+
+func (p *ResponsesProvider) Stream(ctx context.Context, request ai.Request) (ai.Stream, error)
+    Stream sends one normalized turn to the Azure Responses API.
+

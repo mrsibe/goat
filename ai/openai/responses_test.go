@@ -303,3 +303,50 @@ func TestResponsesMapsUserAndToolResultImages(t *testing.T) {
 		t.Fatalf("tool image = %+v", toolImage)
 	}
 }
+
+func TestResponsesClampsMinimumOutputTokens(t *testing.T) {
+	requests := make(chan capturedRequest, 1)
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		requests <- capturedRequest{path: request.URL.Path, body: body}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(
+				"event: response.completed\ndata: " +
+					`{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` +
+					"\n\n",
+			)),
+			Request: request,
+		}, nil
+	})}
+
+	provider, err := openai.NewResponses(openai.Config{
+		APIKey:     "test-key",
+		BaseURL:    "https://example.test",
+		Model:      "gpt-test",
+		HTTPClient: client,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := modeltest.Collect(context.Background(), provider, ai.Request{
+		Messages: []ai.Message{ai.TextMessage(ai.RoleUser, "hi")},
+		Options:  ai.RequestOptions{MaxTokens: 4},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	captured := <-requests
+	var body responsesRequestBody
+	if err := json.Unmarshal(captured.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.MaxOutputTokens != 16 {
+		t.Fatalf("max_output_tokens = %d", body.MaxOutputTokens)
+	}
+}

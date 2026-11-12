@@ -9,7 +9,12 @@ conventions.
 - Provider-neutral messages, content blocks, tool calls, usage, and stream events.
 - Stateful agent lifecycle, steering/follow-up queues, abort, reset, and hooks.
 - Sequential and parallel tool execution, including preflight and streaming updates.
-- OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages adapters.
+- OpenAI Chat Completions, OpenAI Responses, Azure OpenAI v1 (Completions and
+  Responses), Google Gemini, and Anthropic Messages adapters.
+- First-class API-key adapters for OpenRouter (Completions and Anthropic
+  Messages), DeepSeek (Completions), and xAI (Responses).
+- Chat Completions reasoning fields and DeepSeek/OpenRouter request and replay
+  wire formats.
 - OpenAI Responses replay metadata: assistant message id, phase, text signature,
   and function-call item id.
 
@@ -25,11 +30,18 @@ conventions.
   contains only messages produced by the current run.
 - **Retry**: the Agent does not retry provider requests automatically. Use
   `ai.Retry` and `ai.RetryPolicy` at the call site.
-- **Provider surface**: GOAT ships OpenAI Completions, OpenAI Responses, and
-  Anthropic Messages. Pi additionally ships Google, Bedrock, Mistral, Cloudflare,
-  image generation, classification, and other provider-specific capabilities.
-- **Auth and catalog**: GOAT adapters are configured explicitly with API keys,
-  base URLs, and model names. There is no built-in model catalog, OAuth flow, or
+- **Provider surface**: GOAT ships OpenAI Completions, OpenAI Responses, Azure
+  OpenAI v1, Google Gemini, Anthropic Messages, and API-key packages for
+  OpenRouter, DeepSeek, and xAI. Pi additionally ships Bedrock, Mistral,
+  Cloudflare, image generation, classification, OAuth/subscription login, and
+  other provider-specific capabilities.
+- **Compatible endpoints**: OpenAI- and Anthropic-compatible providers can be
+  configured through `BaseURL`, `Provider`, and `Headers`. The dedicated
+  OpenRouter, DeepSeek, and xAI packages also read their provider-specific API
+  key environment variables. GOAT does not ship first-class Bedrock or Mistral
+  adapters yet.
+- **Auth and catalog**: GOAT adapters use API keys, base URLs, and model names.
+  There is no built-in model catalog, OAuth flow, subscription login, or
   provider identity resolver.
 - **Tool call ids**: `ai.ToolCall.ID` stays the provider `call_id`;
   `ai.ToolCall.ItemID` carries the OpenAI Responses item id. Pi combines both

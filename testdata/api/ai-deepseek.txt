@@ -1,0 +1,42 @@
+package deepseek // import "github.com/mrsibe/goat/ai/deepseek"
+
+Package deepseek adapts DeepSeek's OpenAI-compatible Chat Completions API to the
+ai model interface, including its thinking request and replay format.
+
+CONSTANTS
+
+const DefaultBaseURL = "https://api.deepseek.com"
+    DefaultBaseURL is the DeepSeek API base URL.
+
+
+TYPES
+
+type Config struct {
+	APIKey          string
+	BaseURL         string
+	Model           string
+	Provider        string
+	Headers         map[string]string
+	HTTPClient      *http.Client
+	MaxRetries      *int
+	ContextWindow   int
+	MaxOutputTokens int
+}
+    Config configures a DeepSeek model. APIKey falls back to DEEPSEEK_API_KEY
+    when empty.
+
+type Provider struct {
+	*openai.CompletionsProvider
+}
+    Provider is a DeepSeek Chat Completions model.
+
+func New(config Config) (*Provider, error)
+    New creates a DeepSeek Chat Completions provider.
+
+func (p *Provider) Info() ai.ModelInfo
+    Info returns DeepSeek model metadata. DeepSeek Chat Completions accepts text
+    and tools, but not image input.
+
+func (p *Provider) Stream(ctx context.Context, request ai.Request) (ai.Stream, error)
+    Stream sends one normalized turn to DeepSeek.
+

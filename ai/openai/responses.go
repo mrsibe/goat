@@ -17,6 +17,8 @@ import (
 	"github.com/openai/openai-go/v3/shared/constant"
 )
 
+const minResponsesOutputTokens = 16
+
 // ResponsesProvider implements ai.Model using the OpenAI Responses API.
 type ResponsesProvider struct {
 	core providerCore
@@ -130,7 +132,11 @@ func (p *ResponsesProvider) params(request ai.Request) (responses.ResponseNewPar
 		params.TopP = param.NewOpt(*topP)
 	}
 	if request.Options.MaxTokens > 0 {
-		params.MaxOutputTokens = param.NewOpt(int64(request.Options.MaxTokens))
+		maxTokens := request.Options.MaxTokens
+		if maxTokens < minResponsesOutputTokens {
+			maxTokens = minResponsesOutputTokens
+		}
+		params.MaxOutputTokens = param.NewOpt(int64(maxTokens))
 	}
 	if request.Options.ReasoningEffort != "" {
 		params.Reasoning.Effort = shared.ReasoningEffort(request.Options.ReasoningEffort)

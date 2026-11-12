@@ -7,13 +7,13 @@
 **GOAT（Go Agent Toolkit）是一个供应商无关的 Go Agent SDK。**
 
 它把模型协议、消息模型、流式事件和状态化 Agent 循环拆成可组合的包，让你用同一套
-Agent 代码接入 OpenAI、Anthropic 或自定义模型，并在上面构建自己的工作流 Agent、
-编码 Agent 或其他工具型产品。
+Agent 代码接入 OpenAI、Anthropic、Azure OpenAI、Google Gemini 或自定义模型，并在
+上面构建自己的工作流 Agent、编码 Agent 或其他工具型产品。
 
 GOAT 只做核心运行时。编码工具、文件/命令沙箱、会话持久化、MCP、TUI 和 CLI 属于
 产品层，放在独立仓库 [`goding`](https://github.com/mrsibe/goding)。
 
-> 当前版本：**v0.4.1**。v0.x 阶段允许破坏性变更，升级前请阅读
+> 当前版本：**v0.5.0**。v0.x 阶段允许破坏性变更，升级前请阅读
 > [CHANGELOG.md](CHANGELOG.md)。v1.0 之后的兼容承诺见
 > [STABILITY.md](STABILITY.md)，与 pi 的有意差异见
 > [COMPATIBILITY.md](COMPATIBILITY.md)。
@@ -39,8 +39,8 @@ GOAT 只做核心运行时。编码工具、文件/命令沙箱、会话持久�
 ## 为什么用 GOAT
 
 - **换模型不改 Agent 代码。** `ai.Model` 统一了请求、流事件、工具调用、thinking
-  和 usage；OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和
-  自定义模型可以按需替换。
+  和 usage；OpenAI Chat Completions、OpenAI Responses、Azure OpenAI、Google
+  Gemini、Anthropic Messages 和自定义模型可以按需替换。
 - **流式优先。** 文本、thinking 和工具参数都有增量事件。`message_update` 携带
   pi 兼容的 `AssistantMessageEvent`，同时保留 `message_delta`、`thinking_*`
   等扁平事件，方便不同复杂度的消费者。
@@ -56,7 +56,7 @@ GOAT 只做核心运行时。编码工具、文件/命令沙箱、会话持久�
 ## 安装
 
 ```bash
-go get github.com/mrsibe/goat@v0.4.1
+go get github.com/mrsibe/goat@v0.5.0
 ```
 
 需要 Go 1.27.1 或更高版本。
@@ -122,7 +122,12 @@ func main() {
 | --- | --- |
 | `ai` | 供应商无关的消息、内容块、工具声明、请求参数、流事件、usage 和重试工具。 |
 | `ai/openai` | OpenAI Chat Completions 与 Responses 适配器，基于官方 `openai-go` SDK。 |
+| `ai/azure` | Azure OpenAI v1 Completions 与 Responses 适配器，复用 OpenAI 协议实现。 |
+| `ai/google` | Google Gemini 适配器，基于官方 `google.golang.org/genai` SDK。 |
 | `ai/anthropic` | Anthropic Messages 适配器，基于官方 `anthropic-sdk-go`。 |
+| `ai/openrouter` | OpenRouter 的 Chat Completions 与 Anthropic Messages 适配器。 |
+| `ai/deepseek` | DeepSeek Chat Completions 适配器，内置 thinking 请求与回放格式。 |
+| `ai/xai` | xAI Responses 适配器。 |
 | `agent` | 状态化模型循环、工具执行、生命周期事件、输入队列和扩展钩子。 |
 | `ai/faux` | 可脚本化的测试模型，不依赖网络。 |
 | `examples/weather` | 一个最小可运行的天气工具示例。 |
@@ -141,11 +146,10 @@ type Model interface {
 选择适配器：
 
 ```go
-// OpenAI Chat Completions（也兼容 DeepSeek 等 OpenAI 兼容服务）
+// OpenAI Chat Completions
 completions, err := openai.NewCompletions(openai.Config{
 	APIKey:  os.Getenv("OPENAI_API_KEY"),
-	BaseURL: "https://api.deepseek.com",
-	Model:   "deepseek-chat",
+	Model:   "gpt-5",
 })
 
 // OpenAI Responses
@@ -154,32 +158,114 @@ responses, err := openai.NewResponses(openai.Config{
 	Model:  "gpt-5",
 })
 
+// Azure OpenAI Responses
+azureResponses, err := azure.NewResponses(azure.Config{
+	APIKey:       os.Getenv("AZURE_OPENAI_API_KEY"),
+	ResourceName: "my-resource",
+	Deployment:   "gpt-5",
+})
+
+// Google Gemini
+gemini, err := google.New(google.Config{
+	APIKey: os.Getenv("GEMINI_API_KEY"),
+	Model:  "gemini-3-flash",
+})
+
 // Anthropic Messages
 messages, err := anthropic.New(anthropic.Config{
 	APIKey: os.Getenv("ANTHROPIC_API_KEY"),
 	Model:  "claude-sonnet-5-5",
+})
+
+// DeepSeek（APIKey 为空时读取 DEEPSEEK_API_KEY）
+deepseekModel, err := deepseek.New(deepseek.Config{
+	Model: "deepseek-reasoner",
+})
+
+// OpenRouter（APIKey 为空时读取 OPENROUTER_API_KEY）
+openrouterModel, err := openrouter.NewCompletions(openrouter.Config{
+	Model: "anthropic/claude-sonnet-4",
+})
+openrouterMessages, err := openrouter.NewMessages(openrouter.Config{
+	Model: "anthropic/claude-sonnet-4",
+})
+
+// xAI Responses（APIKey 为空时读取 XAI_API_KEY）
+xaiModel, err := xai.New(xai.Config{
+	Model: "grok-4",
 })
 ```
 
 `openai.New` 是 `openai.NewCompletions` 的兼容别名。`Provider`、`ContextWindow`、
 `MaxOutputTokens` 是元数据，不会改变协议路由。Anthropic 未指定 `max_tokens` 时
 默认 4096，可由 `Config.MaxOutputTokens` 或 `RequestOptions.MaxTokens` 覆盖。
+三个专用 provider 包都优先使用显式 `APIKey`，为空时读取各自的环境变量；OpenRouter
+Messages 使用 Bearer 鉴权，并自动处理 Anthropic SDK 的 `/v1/messages` 路径。
+
+Azure 适配器使用 v1 端点：`ResourceName` 会展开为
+`https://<resource>.openai.azure.com/openai/v1`，也可用 `Endpoint` 直接指定代理
+地址。`Deployment` 优先于 `Model`，未设置时把 `Model` 当作部署名。Azure 使用
+`api-key` 请求头，并自动附加 `api-version=v1`。
+
+Google 适配器使用官方 GenAI SDK。自定义 `BaseURL` 应包含版本路径（例如
+`https://proxy.example.com/v1beta`）；未设置时使用 Gemini API 默认端点。
+
+### 兼容供应商
+
+OpenRouter、DeepSeek 和 xAI 有专用包，内置默认端点、环境变量回退以及 reasoning
+请求/回放格式。GOAT 仍不维护模型目录；模型名、能力和计费由供应商决定。
+
+其他 OpenAI Chat Completions 兼容服务可以使用 `openai.NewCompletions`，其他
+Anthropic Messages 兼容服务可以使用 `anthropic.New`。通过 `BaseURL` 指向供应商
+端点，通过 `Provider` 标记 usage/错误来源，通过 `Headers` 传递网关鉴权或路由头。
+
+```go
+openrouterCompatible, err := openai.NewCompletions(openai.Config{
+	APIKey:   os.Getenv("OPENROUTER_API_KEY"),
+	BaseURL:  "https://openrouter.ai/api/v1",
+	Model:    "anthropic/claude-sonnet-4",
+	Provider: "openrouter",
+	Headers: map[string]string{
+		"HTTP-Referer": "https://example.com",
+		"X-Title":      "my-agent",
+	},
+})
+```
+
+其他常见兼容端点示例：
+
+| 供应商 | 适配器 | BaseURL 示例 |
+| --- | --- | --- |
+| Groq | Chat Completions | `https://api.groq.com/openai/v1` |
+| Together | Chat Completions | `https://api.together.ai/v1` |
+| Cerebras | Chat Completions | `https://api.cerebras.ai/v1` |
+| Hugging Face | Chat Completions | `https://router.huggingface.co/v1` |
+| NVIDIA | Chat Completions | `https://integrate.api.nvidia.com/v1` |
+| Moonshot | Chat Completions | `https://api.moonshot.ai/v1` |
+| Z.AI | Chat Completions | `https://api.z.ai/api/coding/paas/v4` |
+| Kimi Coding | Chat Completions | `https://api.kimi.com/coding/v1` |
+| MiniMax | Anthropic Messages | `https://api.minimax.io/anthropic` |
+| Vercel AI Gateway | Anthropic Messages | `https://ai-gateway.vercel.sh` |
+
+以上只是端点示例；模型名、图片/thinking/tool 能力和计费仍由供应商决定。
+Mistral、Bedrock 等独立协议目前没有内置适配器；需要时可以在 GOAT 之上实现自定义
+`ai.Model`，或等待后续专用适配器。GOAT 也不内置 OAuth/订阅登录。
 
 ### 能力矩阵
 
-| 能力 | Chat Completions | Responses | Anthropic Messages |
-| --- | --- | --- | --- |
-| 文本流 | 支持 | 支持 | 支持 |
-| 工具调用与工具结果 | 支持 | 支持 | 支持 |
-| 用户图片输入 | 支持 | 支持 | 支持 |
-| 工具结果图片 | 不支持 | 支持 | 支持 |
-| thinking / 推理内容 | 不支持 | summary + encrypted content | thinking + signature / redacted |
-| `tool_choice` | 支持 | 支持 | 支持 |
-| `top_p` | 支持 | 支持 | 支持 |
-| `reasoning_effort` | 支持 | 支持 | 不适用 |
-| `thinking_budget_tokens` | 不适用 | 不适用 | 支持 |
-| 缓存命中 usage | 支持 | 支持 | 支持 |
-| 请求级缓存键 | `prompt_cache_key` | `prompt_cache_key` | 不适用 |
+| 能力 | Chat Completions | Responses | Azure Responses | Gemini | Anthropic Messages |
+| --- | --- | --- | --- | --- | --- |
+| 文本流 | 支持 | 支持 | 支持 | 支持 | 支持 |
+| 工具调用与工具结果 | 支持 | 支持 | 支持 | 支持 | 支持 |
+| 用户图片输入 | 支持 | 支持 | 支持 | 支持 | 支持 |
+| 工具结果图片 | 不支持 | 支持 | 支持 | Gemini 3+ | 支持 |
+| thinking / 推理内容 | `reasoning_content` / `reasoning` / `reasoning_text`，支持 DeepSeek/OpenRouter 请求与回放格式 | summary + encrypted content | summary + encrypted content | thought + signature | thinking + signature / redacted |
+| `tool_choice` | 支持 | 支持 | 支持 | 支持 | 支持 |
+| `top_p` | 支持 | 支持 | 支持 | 支持 | 支持 |
+| `reasoning_effort` | OpenAI 顶层字段；DeepSeek/OpenRouter 使用各自格式 | 支持 | 支持 | 支持 | 不适用 |
+| `thinking_budget_tokens` | 不适用 | 不适用 | 不适用 | 支持 | 支持 |
+| 缓存命中 usage | 支持 | 支持 | 支持 | 支持 | 支持 |
+| 请求级缓存键 | `prompt_cache_key` | `prompt_cache_key` | `prompt_cache_key` | 不适用 | 不适用 |
 
 模型能力仍受具体模型限制。需要判断是否接受图片工具结果时，检查
 `model.Info().SupportsToolResultImages`。
@@ -522,7 +608,7 @@ GOAT 的目标是把 pi 的核心 Agent 能力带到 Go，而不是复刻 pi cod
 
 ## 版本与稳定性
 
-当前版本是 **v0.4.1**。v0.x 阶段允许破坏性 API，完整迁移说明见
+当前版本是 **v0.5.0**。v0.x 阶段允许破坏性 API，完整迁移说明见
 [CHANGELOG.md](CHANGELOG.md)。
 
 v1.0 的冻结范围、兼容承诺和弃用流程见 [STABILITY.md](STABILITY.md)。
@@ -559,16 +645,16 @@ API 后，运行 `bash scripts/api-snapshot.sh -update` 并审查差异。
 验证，再用 GitHub CLI 创建 Release：
 
 ```bash
-git tag -a v0.4.2 -m "GOAT v0.4.2"
+git tag -a v0.5.0 -m "GOAT v0.5.0"
 git push origin main
-git push origin v0.4.2
+git push origin v0.5.0
 ```
 
 验证发布状态：
 
 ```bash
 gh run list --workflow release.yml
-gh release view v0.4.2
+gh release view v0.5.0
 ```
 
 ## License
