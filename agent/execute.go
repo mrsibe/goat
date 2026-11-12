@@ -76,6 +76,8 @@ func (a *Agent) executeToolCallsSequential(
 		var durationMs int64
 		if prepared.immediate != nil {
 			result = prepared.immediate.clone()
+		} else if ctx.Err() != nil {
+			result = ErrorResult("Operation aborted")
 		} else {
 			executed := a.executePreparedTool(ctx, prepared, step)
 			result, durationMs = a.finalizeTool(ctx, agentContext, assistant, prepared, executed, step)
@@ -121,6 +123,10 @@ func (a *Agent) executeToolCallsParallel(
 		wait.Add(1)
 		go func(index int, prepared preparedToolCall) {
 			defer wait.Done()
+			if ctx.Err() != nil {
+				completed <- completion{index: index, result: ErrorResult("Operation aborted")}
+				return
+			}
 			executed := a.executePreparedTool(ctx, prepared, step)
 			result, durationMs := a.finalizeTool(ctx, agentContext, assistant, prepared, executed, step)
 			completed <- completion{index: index, result: result, durationMs: durationMs}
@@ -196,6 +202,10 @@ func (a *Agent) prepareToolCall(
 			result := ErrorResult(err.Error())
 			return preparedToolCall{call: callCopy, immediate: &result}
 		}
+		if ctx.Err() != nil {
+			result := ErrorResult("Operation aborted")
+			return preparedToolCall{call: callCopy, immediate: &result}
+		}
 		if decision != nil && decision.Block {
 			reason := decision.Reason
 			if reason == "" {
@@ -206,11 +216,19 @@ func (a *Agent) prepareToolCall(
 			return preparedToolCall{call: callCopy, immediate: &result}
 		}
 	}
+	if ctx.Err() != nil {
+		result := ErrorResult("Operation aborted")
+		return preparedToolCall{call: callCopy, immediate: &result}
+	}
 	return preparedToolCall{call: callCopy, tool: tool, args: args}
 }
 
 func (a *Agent) executePreparedTool(ctx context.Context, prepared preparedToolCall, step int) (executed executedToolCall) {
 	started := time.Now()
+	if ctx.Err() != nil {
+		executed.result = ErrorResult("Operation aborted")
+		return executed
+	}
 	var updateMu sync.Mutex
 	var updates sync.WaitGroup
 	accepting := true

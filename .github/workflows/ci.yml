@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -24,6 +25,11 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 
+      - name: Check module files
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
       - name: Build
         run: go build ./...
 
@@ -34,7 +40,7 @@ jobs:
         run: bash scripts/api-snapshot.sh
 
       - name: Test
-        run: go test ./...
+        run: go test -count=1 ./...
 
       - name: Test with race detector
-        run: go test -race ./...
+        run: go test -race -count=1 ./...

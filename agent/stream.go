@@ -77,40 +77,35 @@ func (a *Agent) runModelTurn(
 		}
 
 		switch event.Type {
-		case ai.EventStart, ai.EventTextStart, ai.EventTextEnd:
+		case ai.EventStart:
+		case ai.EventTextStart:
+			accumulator.ensureBlock(event.ContentIndex, ai.BlockText)
+			a.emitStreamUpdate(step, info, started, event, accumulator, "", "")
 		case ai.EventTextDelta:
 			if event.TextDelta != "" {
 				accumulator.addText(event.ContentIndex, event.TextDelta)
-				partial := cloneMessagePointer(event.Partial)
-				a.emit(Event{
-					Type:    EventMessageDelta,
-					Step:    step,
-					Text:    event.TextDelta,
-					Message: partial,
-				})
 			}
+			a.emitStreamUpdate(step, info, started, event, accumulator, event.TextDelta, "")
+		case ai.EventTextEnd:
+			block := accumulator.ensureBlock(event.ContentIndex, ai.BlockText)
+			if block.text.Len() == 0 && event.Text != "" {
+				block.text.WriteString(event.Text)
+			}
+			a.emitStreamUpdate(step, info, started, event, accumulator, "", "")
 		case ai.EventThinkingStart:
-			partial := cloneMessagePointer(event.Partial)
-			a.emit(Event{Type: EventThinkingStart, Step: step, Message: partial})
+			accumulator.ensureBlock(event.ContentIndex, ai.BlockThinking)
+			a.emitStreamUpdate(step, info, started, event, accumulator, "", "")
 		case ai.EventThinkingDelta:
 			if event.ThinkingDelta != "" {
 				accumulator.addThinking(event.ContentIndex, event.ThinkingDelta)
-				partial := cloneMessagePointer(event.Partial)
-				a.emit(Event{
-					Type:     EventThinkingDelta,
-					Step:     step,
-					Thinking: event.ThinkingDelta,
-					Message:  partial,
-				})
 			}
+			a.emitStreamUpdate(step, info, started, event, accumulator, "", event.ThinkingDelta)
 		case ai.EventThinkingEnd:
-			partial := cloneMessagePointer(event.Partial)
-			a.emit(Event{
-				Type:     EventThinkingEnd,
-				Step:     step,
-				Thinking: event.Thinking,
-				Message:  partial,
-			})
+			block := accumulator.ensureBlock(event.ContentIndex, ai.BlockThinking)
+			if block.thinking.Len() == 0 && event.Thinking != "" {
+				block.thinking.WriteString(event.Thinking)
+			}
+			a.emitStreamUpdate(step, info, started, event, accumulator, "", event.Thinking)
 		case ai.EventToolCallStart:
 			if event.ToolCall == nil {
 				err := errors.New("agent: tool call start is missing its payload")
@@ -121,6 +116,7 @@ func (a *Agent) runModelTurn(
 				return assistant, ai.StopReasonError, usage, err
 			}
 			accumulator.startToolCall(event.ContentIndex, *event.ToolCall)
+			a.emitStreamUpdate(step, info, started, event, accumulator, "", "")
 		case ai.EventToolCallDelta:
 			if event.ToolCallDelta == nil {
 				err := errors.New("agent: tool call delta is missing its payload")
@@ -137,6 +133,7 @@ func (a *Agent) runModelTurn(
 				a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
 				return assistant, ai.StopReasonError, usage, err
 			}
+			a.emitStreamUpdate(step, info, started, event, accumulator, "", "")
 		case ai.EventToolCallEnd:
 			if event.ToolCall == nil {
 				err := errors.New("agent: tool call end is missing its payload")
@@ -147,6 +144,7 @@ func (a *Agent) runModelTurn(
 				return assistant, ai.StopReasonError, usage, err
 			}
 			accumulator.finishToolCall(event.ContentIndex, *event.ToolCall)
+			a.emitStreamUpdate(step, info, started, event, accumulator, "", "")
 		case ai.EventUsage:
 			if event.Usage != nil {
 				usage.Add(*event.Usage)
@@ -287,8 +285,87 @@ func cloneMessagePointer(message *ai.Message) *ai.Message {
 	return &cloned
 }
 
+func cloneModelEvent(event ai.Event) ai.Event {
+	event.Partial = cloneMessagePointer(event.Partial)
+	event.Message = cloneMessagePointer(event.Message)
+	if event.ToolCall != nil {
+		call := ai.CloneToolCall(*event.ToolCall)
+		event.ToolCall = &call
+	}
+	if event.ToolCallDelta != nil {
+		delta := *event.ToolCallDelta
+		event.ToolCallDelta = &delta
+	}
+	if event.Usage != nil {
+		usage := *event.Usage
+		event.Usage = &usage
+	}
+	return event
+}
+
+func (a *Agent) emitStreamUpdate(
+	step int,
+	info ai.ModelInfo,
+	started time.Time,
+	modelEvent ai.Event,
+	accumulator *assistantAccumulator,
+	text string,
+	thinking string,
+) {
+	partial := cloneMessagePointer(modelEvent.Partial)
+	if partial == nil {
+		message := accumulator.partialMessage(info, started)
+		partial = &message
+	}
+	providerEvent := cloneModelEvent(modelEvent)
+	providerEvent.Partial = cloneMessagePointer(partial)
+	a.emit(Event{
+		Type:                  EventMessageUpdate,
+		Step:                  step,
+		Text:                  text,
+		Thinking:              thinking,
+		Message:               cloneMessagePointer(partial),
+		AssistantMessageEvent: &providerEvent,
+	})
+
+	switch modelEvent.Type {
+	case ai.EventTextDelta:
+		if text != "" {
+			a.emit(Event{
+				Type:    EventMessageDelta,
+				Step:    step,
+				Text:    text,
+				Message: cloneMessagePointer(partial),
+			})
+		}
+	case ai.EventThinkingStart:
+		a.emit(Event{
+			Type:    EventThinkingStart,
+			Step:    step,
+			Message: cloneMessagePointer(partial),
+		})
+	case ai.EventThinkingDelta:
+		if thinking != "" {
+			a.emit(Event{
+				Type:     EventThinkingDelta,
+				Step:     step,
+				Thinking: thinking,
+				Message:  cloneMessagePointer(partial),
+			})
+		}
+	case ai.EventThinkingEnd:
+		a.emit(Event{
+			Type:     EventThinkingEnd,
+			Step:     step,
+			Thinking: thinking,
+			Message:  cloneMessagePointer(partial),
+		})
+	}
+}
+
 type toolCallAccumulator struct {
 	id               string
+	itemID           string
 	name             string
 	arguments        strings.Builder
 	argumentsError   string
@@ -333,6 +410,9 @@ func (a *assistantAccumulator) startToolCall(index int, call ai.ToolCall) {
 	if call.ID != "" {
 		acc.id = call.ID
 	}
+	if call.ItemID != "" {
+		acc.itemID = call.ItemID
+	}
 	if call.Name != "" {
 		acc.name = call.Name
 	}
@@ -348,6 +428,9 @@ func (a *assistantAccumulator) finishToolCall(index int, call ai.ToolCall) {
 	acc := a.ensureToolCall(index)
 	if call.ID != "" {
 		acc.id = call.ID
+	}
+	if call.ItemID != "" {
+		acc.itemID = call.ItemID
 	}
 	if call.Name != "" {
 		acc.name = call.Name
@@ -397,6 +480,89 @@ func (a *assistantAccumulator) hasToolCalls() bool {
 	return false
 }
 
+func (a *assistantAccumulator) partialMessage(info ai.ModelInfo, started time.Time) ai.Message {
+	message := ai.Message{
+		Role:      ai.RoleAssistant,
+		Provider:  info.Provider,
+		Model:     info.Model,
+		API:       info.API,
+		Timestamp: started.UnixMilli(),
+	}
+	for _, key := range a.order {
+		block := a.blocks[key]
+		switch block.kind {
+		case ai.BlockText:
+			message.Content = append(message.Content, ai.ContentBlock{
+				Type: ai.BlockText,
+				Text: block.text.String(),
+			})
+		case ai.BlockThinking:
+			message.Content = append(message.Content, ai.ContentBlock{
+				Type:     ai.BlockThinking,
+				Thinking: block.thinking.String(),
+			})
+		case ai.BlockToolCall:
+			if block.call == nil {
+				continue
+			}
+			call := block.call.partial(key.index)
+			message.Content = append(message.Content, ai.ContentBlock{
+				Type:     ai.BlockToolCall,
+				ToolCall: &call,
+			})
+		}
+	}
+	return message
+}
+
+func (a *toolCallAccumulator) partial(index int) ai.ToolCall {
+	id := a.id
+	itemID := a.itemID
+	name := a.name
+	arguments := a.arguments.String()
+	argumentsError := a.argumentsError
+	thoughtSignature := a.thoughtSignature
+	namespace := a.namespace
+	if a.final != nil {
+		if a.final.ID != "" {
+			id = a.final.ID
+		}
+		if a.final.ItemID != "" {
+			itemID = a.final.ItemID
+		}
+		if a.final.Name != "" {
+			name = a.final.Name
+		}
+		if len(a.final.Arguments) > 0 {
+			arguments = string(a.final.Arguments)
+		}
+		if a.final.ArgumentsError != "" {
+			argumentsError = a.final.ArgumentsError
+		}
+		if a.final.ThoughtSignature != "" {
+			thoughtSignature = a.final.ThoughtSignature
+		}
+		if a.final.Namespace != "" {
+			namespace = a.final.Namespace
+		}
+	}
+	if id == "" {
+		id = fmt.Sprintf("call_%d", index)
+	}
+	if strings.TrimSpace(arguments) == "" {
+		arguments = "{}"
+	}
+	return ai.ToolCall{
+		ID:               id,
+		ItemID:           itemID,
+		Name:             name,
+		Arguments:        json.RawMessage(arguments),
+		ArgumentsError:   argumentsError,
+		ThoughtSignature: thoughtSignature,
+		Namespace:        namespace,
+	}
+}
+
 func (a *assistantAccumulator) message() (ai.Message, error) {
 	message := ai.Message{Role: ai.RoleAssistant}
 	seenIDs := make(map[string]struct{})
@@ -428,6 +594,7 @@ func (a *assistantAccumulator) message() (ai.Message, error) {
 			continue
 		}
 		id := call.id
+		itemID := call.itemID
 		name := call.name
 		arguments := call.arguments.String()
 		argumentsError := call.argumentsError
@@ -436,6 +603,9 @@ func (a *assistantAccumulator) message() (ai.Message, error) {
 		if call.final != nil {
 			if call.final.ID != "" {
 				id = call.final.ID
+			}
+			if call.final.ItemID != "" {
+				itemID = call.final.ItemID
 			}
 			if call.final.Name != "" {
 				name = call.final.Name
@@ -468,6 +638,7 @@ func (a *assistantAccumulator) message() (ai.Message, error) {
 		}
 		toolCall := ai.ToolCall{
 			ID:               id,
+			ItemID:           itemID,
 			Name:             name,
 			Arguments:        json.RawMessage(arguments),
 			ArgumentsError:   argumentsError,

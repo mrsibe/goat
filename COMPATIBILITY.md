@@ -17,8 +17,10 @@ conventions.
 
 - **Core only**: coding tools, CLI/TUI, durable sessions, MCP, codemode, and
   extension packaging live in the separate `goding` product repository.
-- **Flat events**: GOAT emits `message_delta`, `thinking_*`, and tool events
-  directly. Pi wraps assistant stream events in a nested `message_update`.
+- **Event shape**: GOAT emits pi-compatible `message_update` events with the
+  original `AssistantMessageEvent`. It additionally exposes flat
+  `message_delta`, `thinking_*`, and tool execution events for simpler
+  consumers.
 - **Result shape**: `Result.Messages` is the full transcript; `Result.NewMessages`
   contains only messages produced by the current run.
 - **Retry**: the Agent does not retry provider requests automatically. Use
@@ -39,6 +41,9 @@ conventions.
   preserve an empty content array.
 - **Session persistence**: `Config.SessionID` is forwarded to provider cache
   hints. Durable conversation storage is a `goding` concern, not a core feature.
+- **Reset baseline**: GOAT restores the configured initial system prompt. Pi
+  retains the current system message. Dynamic tool declarations are not part of
+  GOAT's agent state model.
 
 ## Conformance
 

@@ -6,7 +6,7 @@
 
 仓库：<https://github.com/mrsibe/goat>
 
-> 当前目标版本是 v0.4.0。v0.x 阶段允许破坏性 API，升级前请阅读
+> 当前目标版本是 v0.4.1。v0.x 阶段允许破坏性 API，升级前请阅读
 > [CHANGELOG.md](CHANGELOG.md) 的迁移说明。v1.0 之后遵循
 > [STABILITY.md](STABILITY.md) 的兼容承诺；与 pi 的有意差异见
 > [COMPATIBILITY.md](COMPATIBILITY.md)。
@@ -30,7 +30,7 @@ GOAT 只负责 Agent SDK 的核心边界：
 ## 安装
 
 ```bash
-go get github.com/mrsibe/goat@v0.4.0
+go get github.com/mrsibe/goat@v0.4.1
 ```
 
 ## 快速开始
@@ -332,7 +332,7 @@ SDK 不内置历史压缩。压缩策略、摘要调用和 token 预算由使用
 ```text
 agent_start
   turn_start
-    message_start / message_delta / message_end
+    message_start / message_update / message_delta / message_end
     thinking_start / thinking_delta / thinking_end
     tool_start / tool_update / tool_end
   turn_end
@@ -342,7 +342,9 @@ agent_end
 
 `Event.ToolResults` 在 `turn_end` 中一次给出本轮全部工具结果。`Event.ToolUpdate`
 携带 `PartialResult`。`Event.DurationMs` 表示工具执行耗时。`Event.Err` 是原始
-错误，`Event.Error` 是可序列化文本。事件回调阻塞会阻塞当前 run。
+错误，`Event.Error` 是可序列化文本。`EventMessageUpdate` 同时携带
+`Message` 和原始 `AssistantMessageEvent`，包括文本、thinking 和工具参数增量；
+`message_delta` 与 `thinking_*` 继续作为便捷的扁平事件。事件回调阻塞会阻塞当前 run。
 
 ```go
 assistant.Subscribe(func(event agent.Event) {
@@ -432,6 +434,15 @@ model := faux.New(
    元数据、details、structured content 和 usage。
 10. `coding`、`codingagent` 和 `cmd/goding` 继续留在独立仓库 `goding`。
 
+### v0.4.1 的变化
+
+1. 新增 `agent.EventMessageUpdate` 和 `Event.AssistantMessageEvent`，暴露 pi
+   兼容的 assistant 流事件，包括工具调用参数增量。
+2. 修复取消竞态：context 取消后，工具调用不会在预检之后继续启动。
+3. 流式累积工具调用时保留 `ai.ToolCall.ItemID`。
+4. CI 增加模块整洁性检查；推送 `v*` tag 会先运行完整验证，再创建 GitHub
+   Release。
+
 ### v0.4.0 的变化
 
 1. `Result` 新增 `NewMessages`；`Messages` 继续表示完整 transcript。
@@ -467,3 +478,6 @@ GOCACHE=/tmp/goat-gocache GOFLAGS=-buildvcs=false go vet ./...
 GOCACHE=/tmp/goat-gocache GOFLAGS=-buildvcs=false go build ./...
 bash scripts/api-snapshot.sh
 ```
+
+`main` 分支和 PR 由 `.github/workflows/ci.yml` 验证。发布时推送 `v*` tag，
+`.github/workflows/release.yml` 会复用 CI 并通过 GitHub CLI 创建 Release。

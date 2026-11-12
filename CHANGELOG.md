@@ -3,6 +3,24 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 和
 [语义化版本](https://semver.org/lang/zh-CN/)。v0.x 阶段允许破坏性变更。
 
+## [0.4.1] - 2026-11-12
+
+### Added
+
+- `agent.EventMessageUpdate` 和 `Event.AssistantMessageEvent`：暴露文本、
+  thinking 和工具调用参数增量；`message_delta` / `thinking_*` 扁平事件继续保留。
+- tag 触发的 Release workflow：复用 CI 验证后自动创建 GitHub Release。
+
+### Changed
+
+- CI 增加模块整洁性检查，并使用 `-count=1` 运行测试。
+
+### Fixed
+
+- context 取消后，工具调用不再在预检完成后继续执行；取消会产生
+  `Operation aborted` 工具 observation。
+- Agent 累积流式工具调用时保留 `ai.ToolCall.ItemID`。
+
 ## [0.4.0] - 2026-11-12
 
 ### Added

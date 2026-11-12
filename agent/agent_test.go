@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,7 +43,9 @@ func TestPromptDirectAnswer(t *testing.T) {
 		agent.EventMessageStart,
 		agent.EventMessageEnd,
 		agent.EventMessageStart,
+		agent.EventMessageUpdate,
 		agent.EventMessageDelta,
+		agent.EventMessageUpdate,
 		agent.EventMessageDelta,
 		agent.EventMessageEnd,
 		agent.EventTurnEnd,
@@ -63,6 +66,136 @@ func TestPromptDirectAnswer(t *testing.T) {
 	state := a.State()
 	if state.IsStreaming || len(state.Messages) != 3 || state.SystemPrompt != "system" {
 		t.Fatalf("state = %+v", state)
+	}
+}
+
+func TestMessageUpdateExposesStreamingAssistantEvents(t *testing.T) {
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventStart},
+			{Type: ai.EventTextStart, ContentIndex: 0},
+			{Type: ai.EventTextDelta, ContentIndex: 0, TextDelta: "hello"},
+			{Type: ai.EventTextEnd, ContentIndex: 0, Text: "hello"},
+			{Type: ai.EventToolCallStart, ContentIndex: 1, ToolCall: &ai.ToolCall{
+				ID:     "call_1",
+				ItemID: "item_1",
+				Name:   "echo",
+			}},
+			{Type: ai.EventToolCallDelta, ContentIndex: 1, ToolCallDelta: &ai.ToolCallDelta{
+				ArgumentsDelta: `{"value":"x"}`,
+			}},
+			{Type: ai.EventToolCallEnd, ContentIndex: 1, ToolCall: &ai.ToolCall{
+				ID:        "call_1",
+				ItemID:    "item_1",
+				Name:      "echo",
+				Arguments: json.RawMessage(`{"value":"x"}`),
+			}},
+			{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "done"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+		return "ok", nil
+	})
+	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{echo}})
+	log := subscribe(a)
+
+	result, err := a.Prompt(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawTextDelta, sawToolCallDelta bool
+	for _, event := range log.snapshot() {
+		if event.Type != agent.EventMessageUpdate {
+			continue
+		}
+		if event.Message == nil || event.AssistantMessageEvent == nil {
+			t.Fatalf("message_update is missing payloads: %+v", event)
+		}
+		switch event.AssistantMessageEvent.Type {
+		case ai.EventTextDelta:
+			if event.Step != 1 {
+				continue
+			}
+			sawTextDelta = true
+			if event.Text != "hello" || event.Message.Text() != "hello" {
+				t.Fatalf("text update = %+v", event)
+			}
+		case ai.EventToolCallDelta:
+			sawToolCallDelta = true
+			if event.AssistantMessageEvent.ToolCallDelta == nil ||
+				event.AssistantMessageEvent.ToolCallDelta.ArgumentsDelta != `{"value":"x"}` {
+				t.Fatalf("tool call delta = %+v", event.AssistantMessageEvent)
+			}
+			calls := event.Message.ToolCalls()
+			if len(calls) != 1 || calls[0].ItemID != "item_1" ||
+				!strings.Contains(string(calls[0].Arguments), `"value"`) {
+				t.Fatalf("partial tool call = %+v", calls)
+			}
+		}
+	}
+	if !sawTextDelta || !sawToolCallDelta {
+		t.Fatalf("message updates = %v", eventTypes(log.snapshot()))
+	}
+	calls := result.Messages[1].ToolCalls()
+	if len(calls) != 1 || calls[0].ItemID != "item_1" {
+		t.Fatalf("tool call transcript = %+v", calls)
+	}
+}
+
+func TestAbortDuringToolPreflightPreventsExecution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	model := faux.New(
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventToolCallDelta, ContentIndex: 0, ToolCallDelta: &ai.ToolCallDelta{
+				ID:             "call_1",
+				Name:           "side_effect",
+				ArgumentsDelta: "{}",
+			}},
+			{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
+		}},
+		faux.Turn{Events: []ai.Event{
+			{Type: ai.EventTextDelta, TextDelta: "should not run"},
+			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
+		}},
+	)
+	var executed atomic.Bool
+	tool := agent.NewTextTool(agent.ToolSpec{Name: "side_effect"}, func(context.Context, ai.ToolCall) (string, error) {
+		executed.Store(true)
+		return "ran", nil
+	})
+	a := newAgent(t, agent.Config{
+		Model: model,
+		Tools: []agent.Tool{tool},
+		BeforeToolCall: func(context.Context, agent.BeforeToolCallContext) (*agent.BeforeToolCallResult, error) {
+			cancel()
+			return nil, nil
+		},
+	})
+
+	result, err := a.Prompt(ctx, "go")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("prompt error = %v", err)
+	}
+	if executed.Load() {
+		t.Fatal("tool executed after context cancellation")
+	}
+	if len(model.Requests) != 1 {
+		t.Fatalf("model requests = %d, want 1", len(model.Requests))
+	}
+	var observation string
+	for _, message := range result.Messages {
+		if message.Role == ai.RoleTool {
+			observation = message.Text()
+		}
+	}
+	if !strings.Contains(observation, "Operation aborted") {
+		t.Fatalf("tool observation = %q", observation)
 	}
 }
 

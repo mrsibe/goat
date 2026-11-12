@@ -43,6 +43,7 @@ const (
 	EventAgentStart    EventType = "agent_start"
 	EventTurnStart     EventType = "turn_start"
 	EventMessageStart  EventType = "message_start"
+	EventMessageUpdate EventType = "message_update"
 	EventMessageDelta  EventType = "message_delta"
 	EventMessageEnd    EventType = "message_end"
 	EventThinkingStart EventType = "thinking_start"
@@ -58,19 +59,20 @@ const (
 
 // Event is delivered synchronously while an agent run is in progress.
 type Event struct {
-	Type          EventType    `json:"type"`
-	Step          int          `json:"step,omitempty"`
-	Text          string       `json:"text,omitempty"`
-	Thinking      string       `json:"thinking,omitempty"`
-	Message       *ai.Message  `json:"message,omitempty"`
-	ToolCall      *ai.ToolCall `json:"tool_call,omitempty"`
-	ToolResult    *ToolResult  `json:"tool_result,omitempty"`
-	PartialResult *ToolResult  `json:"partial_result,omitempty"`
-	ToolResults   []ToolResult `json:"tool_results,omitempty"`
-	DurationMs    int64        `json:"duration_ms,omitempty"`
-	Result        *Result      `json:"result,omitempty"`
-	Err           error        `json:"-"`
-	Error         string       `json:"error,omitempty"`
+	Type                  EventType    `json:"type"`
+	Step                  int          `json:"step,omitempty"`
+	Text                  string       `json:"text,omitempty"`
+	Thinking              string       `json:"thinking,omitempty"`
+	Message               *ai.Message  `json:"message,omitempty"`
+	AssistantMessageEvent *ai.Event    `json:"assistant_message_event,omitempty"`
+	ToolCall              *ai.ToolCall `json:"tool_call,omitempty"`
+	ToolResult            *ToolResult  `json:"tool_result,omitempty"`
+	PartialResult         *ToolResult  `json:"partial_result,omitempty"`
+	ToolResults           []ToolResult `json:"tool_results,omitempty"`
+	DurationMs            int64        `json:"duration_ms,omitempty"`
+	Result                *Result      `json:"result,omitempty"`
+	Err                   error        `json:"-"`
+	Error                 string       `json:"error,omitempty"`
 }
 
 // Result is the complete outcome of one agent run.

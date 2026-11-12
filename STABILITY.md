@@ -1,6 +1,6 @@
 # API Stability
 
-GOAT is pre-1.0. The v0.4 release is the final planned stabilization pass
+GOAT is pre-1.0. The v0.4.x release line is the final planned stabilization pass
 before v1.0; breaking changes remain possible until v1.0 and must be documented
 in `CHANGELOG.md`.
 

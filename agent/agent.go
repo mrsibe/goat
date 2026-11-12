@@ -596,7 +596,7 @@ func (a *Agent) emit(event Event) {
 			message := ai.CloneMessage(*event.Message)
 			a.streamingMessage = &message
 		}
-	case EventMessageDelta, EventThinkingStart, EventThinkingDelta, EventThinkingEnd:
+	case EventMessageUpdate, EventMessageDelta, EventThinkingStart, EventThinkingDelta, EventThinkingEnd:
 		if event.Message != nil {
 			message := ai.CloneMessage(*event.Message)
 			a.streamingMessage = &message
