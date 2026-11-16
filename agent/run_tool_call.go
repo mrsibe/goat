@@ -108,6 +108,7 @@ func RunToolCall(ctx context.Context, call ai.ToolCall, options RunToolCallOptio
 		result = ErrorResult(executeErr.Error())
 	}
 	outcome.Result, outcome.IsError = applyToolCallHooks(ctx, options, prepared, result)
+	recordNestedOutcome(ctx, prepared.call, argsOf(prepared), outcome)
 	return outcome
 }
 
@@ -184,6 +185,24 @@ func applyToolCallHooks(
 		return ErrorResult(fmt.Sprintf("tool %q returned invalid content: %s", prepared.call.Name, validateErr)), true
 	}
 	return result, isError
+}
+
+func recordNestedOutcome(ctx context.Context, call ai.ToolCall, args json.RawMessage, outcome ToolCallOutcome) {
+	recorder := nestedRecorderFromContext(ctx)
+	if recorder == nil {
+		return
+	}
+	status := "ok"
+	message := ""
+	if outcome.IsError {
+		status = "error"
+		message = outcome.Result.Text()
+	}
+	recorder.record(call.ID, call.Name, args, status, outcome.DurationMs, message)
+}
+
+func argsOf(prepared preparedToolCall) json.RawMessage {
+	return ai.CloneRawMessage(prepared.call.Arguments)
 }
 
 func failToolCall(outcome ToolCallOutcome, message string) ToolCallOutcome {

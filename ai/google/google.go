@@ -68,6 +68,7 @@ func New(config Config) (*Provider, error) {
 			httpOptions.Headers.Set(key, value)
 		}
 	}
+	config.HTTPClient = ai.HookHTTPClient(config.HTTPClient)
 	if config.MaxRetries != nil {
 		attempts := int32(*config.MaxRetries + 1)
 		if attempts < 1 {
@@ -117,6 +118,15 @@ func (p *Provider) Stream(ctx context.Context, request ai.Request) (ai.Stream, e
 	if p == nil || p.client == nil {
 		return nil, errors.New("google: provider is nil")
 	}
+	if err := ai.ValidateTransport(request.Options.Transport); err != nil {
+		return nil, err
+	}
+	ctx = ai.WithRequestHooks(ctx, request.Options, p.info.Provider)
+	if request.Options.TimeoutMs > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.Options.TimeoutMs)*time.Millisecond)
+		defer cancel()
+	}
 	contents, system, err := p.convertMessages(request.Messages)
 	if err != nil {
 		return nil, err
@@ -129,6 +139,7 @@ func (p *Provider) Stream(ctx context.Context, request ai.Request) (ai.Stream, e
 	sequence := p.client.Models.GenerateContentStream(ctx, p.info.Model, contents, config)
 	next, stop := iter.Pull2(sequence)
 	return &responseStream{
+		ctx:     ctx,
 		info:    p.info,
 		builder: streaming.New(p.info),
 		next:    next,
@@ -171,6 +182,7 @@ func (p *Provider) generationConfig(request ai.Request, system string) (*genai.G
 var toolCallCounter atomic.Uint64
 
 type responseStream struct {
+	ctx     context.Context
 	info    ai.ModelInfo
 	builder *streaming.Builder
 	next    func() (*genai.GenerateContentResponse, error, bool)

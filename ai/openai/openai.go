@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/mrsibe/goat/ai"
 	openaisdk "github.com/openai/openai-go/v3"
@@ -78,9 +79,7 @@ func newProviderCore(config Config, api ai.API) (providerCore, error) {
 	if config.BaseURL != "" {
 		options = append(options, option.WithBaseURL(config.BaseURL))
 	}
-	if config.HTTPClient != nil {
-		options = append(options, option.WithHTTPClient(config.HTTPClient))
-	}
+	options = append(options, option.WithHTTPClient(ai.HookHTTPClient(config.HTTPClient)))
 	if config.MaxRetries != nil {
 		options = append(options, option.WithMaxRetries(*config.MaxRetries))
 	}
@@ -140,6 +139,20 @@ var _ ai.Model = (*ResponsesProvider)(nil)
 // Provider is the original name for a Chat Completions model. New code should
 // use [CompletionsProvider] or [ResponsesProvider] explicitly.
 type Provider = CompletionsProvider
+
+func (p *providerCore) requestOptions(options ai.RequestOptions) []option.RequestOption {
+	var result []option.RequestOption
+	if options.APIKey != "" {
+		result = append(result, option.WithAPIKey(options.APIKey))
+	}
+	if options.TimeoutMs > 0 {
+		result = append(result, option.WithRequestTimeout(time.Duration(options.TimeoutMs)*time.Millisecond))
+	}
+	if options.MaxRetries > 0 {
+		result = append(result, option.WithMaxRetries(options.MaxRetries))
+	}
+	return result
+}
 
 func (p *providerCore) Info() ai.ModelInfo {
 	if p == nil {

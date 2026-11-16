@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -60,9 +61,7 @@ func New(config Config) (*Provider, error) {
 	if config.BaseURL != "" {
 		options = append(options, option.WithBaseURL(config.BaseURL))
 	}
-	if config.HTTPClient != nil {
-		options = append(options, option.WithHTTPClient(config.HTTPClient))
-	}
+	options = append(options, option.WithHTTPClient(ai.HookHTTPClient(config.HTTPClient)))
 	if config.MaxRetries != nil {
 		options = append(options, option.WithMaxRetries(*config.MaxRetries))
 	}
@@ -116,15 +115,30 @@ func (p *Provider) Stream(ctx context.Context, request ai.Request) (ai.Stream, e
 	if p == nil {
 		return nil, errors.New("anthropic: provider is nil")
 	}
+	if err := ai.ValidateTransport(request.Options.Transport); err != nil {
+		return nil, err
+	}
+	ctx = ai.WithRequestHooks(ctx, request.Options, p.info.Provider)
 	params, err := p.params(request)
 	if err != nil {
 		return nil, err
 	}
-	raw := p.client.Messages.NewStreaming(ctx, params)
+	requestOptions := []option.RequestOption{}
+	if request.Options.APIKey != "" {
+		requestOptions = append(requestOptions, option.WithAPIKey(request.Options.APIKey))
+	}
+	if request.Options.TimeoutMs > 0 {
+		requestOptions = append(requestOptions, option.WithRequestTimeout(time.Duration(request.Options.TimeoutMs)*time.Millisecond))
+	}
+	if request.Options.MaxRetries > 0 {
+		requestOptions = append(requestOptions, option.WithMaxRetries(request.Options.MaxRetries))
+	}
+	raw := p.client.Messages.NewStreaming(ctx, params, requestOptions...)
 	if raw == nil {
 		return nil, errors.New("anthropic: provider returned a nil stream")
 	}
 	return &messageStream{
+		ctx:     ctx,
 		raw:     raw,
 		info:    p.info,
 		builder: streaming.New(p.info),
@@ -443,6 +457,7 @@ type contentBlock struct {
 }
 
 type messageStream struct {
+	ctx     context.Context
 	raw     messageEventStream
 	info    ai.ModelInfo
 	builder *streaming.Builder
@@ -492,6 +507,7 @@ func (s *messageStream) Next() (ai.Event, error) {
 }
 
 func (s *messageStream) consume(event anthropicsdk.MessageStreamEventUnion) {
+	_ = ai.EmitProviderStreamEvent(s.ctx, event)
 	switch event.Type {
 	case "message_start":
 		start := event.AsMessageStart()

@@ -14,12 +14,13 @@ import (
 
 // ToolResult is the observation returned to the model after a tool call.
 type ToolResult struct {
-	Content           []ai.ContentBlock `json:"content"`
-	Details           json.RawMessage   `json:"details,omitempty"`
-	StructuredContent json.RawMessage   `json:"structured_content,omitempty"`
-	Usage             *ai.Usage         `json:"usage,omitempty"`
-	IsError           bool              `json:"is_error"`
-	Terminate         bool              `json:"terminate,omitempty"`
+	Content           []ai.ContentBlock   `json:"content"`
+	Details           json.RawMessage     `json:"details,omitempty"`
+	StructuredContent json.RawMessage     `json:"structured_content,omitempty"`
+	Usage             *ai.Usage           `json:"usage,omitempty"`
+	NestedCalls       *ai.NestedToolCalls `json:"nested_calls,omitempty"`
+	IsError           bool                `json:"is_error"`
+	Terminate         bool                `json:"terminate,omitempty"`
 }
 
 // TextResult creates a successful text tool result.
@@ -56,6 +57,11 @@ func (r ToolResult) clone() ToolResult {
 	if r.Usage != nil {
 		usage := *r.Usage
 		cloned.Usage = &usage
+	}
+	if r.NestedCalls != nil {
+		nested := *r.NestedCalls
+		nested.Calls = append([]ai.NestedToolCallRecord(nil), r.NestedCalls.Calls...)
+		cloned.NestedCalls = &nested
 	}
 	return cloned
 }

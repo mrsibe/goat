@@ -858,3 +858,39 @@ func TestPiParityToolExecutionEventNames(t *testing.T) {
 		)
 	}
 }
+
+// pi: nested tool calls are recorded on the tool result.
+func TestPiParityNestedToolCalls(t *testing.T) {
+	model := faux.New(
+		piParityToolTurn(piParityToolCall(0, "call_outer", "outer", `{}`)),
+		piParityTextTurn("done"),
+	)
+	inner := agent.NewTextTool(agent.ToolSpec{Name: "inner"}, func(context.Context, string, json.RawMessage) (string, error) {
+		return "inner result", nil
+	})
+	outer := agent.NewTool(agent.ToolSpec{Name: "outer"}, func(ctx context.Context, _ string, _ json.RawMessage) (agent.ToolResult, error) {
+		nested := agent.RunToolCall(ctx, ai.ToolCall{
+			ID:        "inner_1",
+			Name:      "inner",
+			Arguments: json.RawMessage(`{"value":"x"}`),
+		}, agent.RunToolCallOptions{Tools: []agent.Tool{inner}})
+		return agent.TextResult(nested.Result.Text()), nil
+	})
+	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{outer}})
+
+	result, err := a.Prompt(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolMessage := findToolMessage(result.Messages, "call_outer")
+	if toolMessage == nil || toolMessage.NestedCalls == nil {
+		t.Fatalf("missing nested calls: %+v", toolMessage)
+	}
+	calls := toolMessage.NestedCalls.Calls
+	if len(calls) != 1 || calls[0].Name != "inner" || calls[0].Status != "ok" {
+		t.Fatalf("nested calls = %+v", calls)
+	}
+	if !toolMessage.NestedCalls.Complete {
+		t.Fatal("nested calls must be complete")
+	}
+}

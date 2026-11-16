@@ -269,12 +269,16 @@ func (a *Agent) executePreparedTool(ctx context.Context, prepared preparedToolCa
 		})
 	}
 
+	toolCtx, recorder := WithNestedCallRecorder(ctx)
 	result, err := prepared.tool.Execute(
-		ctx,
+		toolCtx,
 		prepared.call.ID,
 		ai.CloneRawMessage(prepared.call.Arguments),
 		update,
 	)
+	if nested := recorder.snapshot(); nested != nil {
+		result.NestedCalls = nested
+	}
 	executed.durationMs = time.Since(started).Milliseconds()
 	closeUpdates()
 	if err != nil {
@@ -391,6 +395,7 @@ func toolResultMessage(call ai.ToolCall, result ToolResult, durationMs int64) ai
 		Details:           ai.CloneRawMessage(result.Details),
 		StructuredContent: ai.CloneRawMessage(result.StructuredContent),
 		Usage:             cloneUsage(result.Usage),
+		NestedCalls:       result.NestedCalls,
 		DurationMs:        durationMs,
 		At:                time.Now().UnixMilli(),
 	}

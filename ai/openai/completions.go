@@ -40,12 +40,17 @@ func (p *CompletionsProvider) Stream(ctx context.Context, request ai.Request) (a
 	if p == nil {
 		return nil, errors.New("openai: provider is nil")
 	}
+	if err := ai.ValidateTransport(request.Options.Transport); err != nil {
+		return nil, err
+	}
+	ctx = ai.WithRequestHooks(ctx, request.Options, p.core.info.Provider)
 	params, err := p.params(request)
 	if err != nil {
 		return nil, err
 	}
-	raw := p.core.client.Chat.Completions.NewStreaming(ctx, params)
+	raw := p.core.client.Chat.Completions.NewStreaming(ctx, params, p.core.requestOptions(request.Options)...)
 	return p.core.validateStream(&completionsStream{
+		ctx:     ctx,
 		raw:     raw,
 		info:    p.core.info,
 		builder: streaming.New(p.core.info),
@@ -312,6 +317,7 @@ func completionsToolChoice(choice ai.ToolChoice) (openaisdk.ChatCompletionToolCh
 }
 
 type completionsStream struct {
+	ctx              context.Context
 	raw              streamReader[openaisdk.ChatCompletionChunk]
 	info             ai.ModelInfo
 	builder          *streaming.Builder
@@ -366,6 +372,7 @@ func (s *completionsStream) normalizeError(err error) error {
 }
 
 func (s *completionsStream) consume(chunk openaisdk.ChatCompletionChunk) {
+	_ = ai.EmitProviderStreamEvent(s.ctx, chunk)
 	if chunk.JSON.Usage.Valid() {
 		s.pending = append(s.pending, s.builder.SetUsage(completionsUsage(chunk.Usage)))
 	}

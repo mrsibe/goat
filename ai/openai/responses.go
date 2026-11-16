@@ -44,12 +44,17 @@ func (p *ResponsesProvider) Stream(ctx context.Context, request ai.Request) (ai.
 	if p == nil {
 		return nil, errors.New("openai: provider is nil")
 	}
+	if err := ai.ValidateTransport(request.Options.Transport); err != nil {
+		return nil, err
+	}
+	ctx = ai.WithRequestHooks(ctx, request.Options, p.core.info.Provider)
 	params, err := p.params(request)
 	if err != nil {
 		return nil, err
 	}
-	raw := p.core.client.Responses.NewStreaming(ctx, params)
+	raw := p.core.client.Responses.NewStreaming(ctx, params, p.core.requestOptions(request.Options)...)
 	return p.core.validateStream(&responsesStream{
+		ctx:     ctx,
 		raw:     raw,
 		info:    p.core.info,
 		builder: streaming.New(p.core.info),
@@ -305,6 +310,7 @@ func responsesToolChoice(choice ai.ToolChoice) (responses.ResponseNewParamsToolC
 }
 
 type responsesStream struct {
+	ctx           context.Context
 	raw           responsesEventStream
 	info          ai.ModelInfo
 	builder       *streaming.Builder
@@ -369,6 +375,7 @@ func (s *responsesStream) Next() (ai.Event, error) {
 }
 
 func (s *responsesStream) consume(event responses.ResponseStreamEventUnion) {
+	_ = ai.EmitProviderStreamEvent(s.ctx, event)
 	switch event.Type {
 	case "response.created", "response.in_progress", "response.queued":
 	case "response.reasoning_summary_text.delta":

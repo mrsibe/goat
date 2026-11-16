@@ -1,6 +1,9 @@
 package ai
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 // API identifies a provider protocol.
 type API string
@@ -66,6 +69,30 @@ type RequestOptions struct {
 	SessionID            string     `json:"session_id,omitempty"`
 	ReasoningEffort      string     `json:"reasoning_effort,omitempty"`
 	ThinkingBudgetTokens int        `json:"thinking_budget_tokens,omitempty"`
+
+	// APIKey overrides the provider credential for this request.
+	APIKey string `json:"-"`
+	// OnPayload inspects or replaces the provider request body. Returning nil
+	// keeps the payload unchanged.
+	OnPayload func(map[string]any) (map[string]any, error) `json:"-"`
+	// OnResponse observes the raw HTTP response before its body is consumed.
+	OnResponse func(status int, headers http.Header) error `json:"-"`
+	// OnProviderStreamEvent observes each raw provider stream event before
+	// normalization.
+	OnProviderStreamEvent func(event any) error `json:"-"`
+	// Identity overrides User-Agent and provider attribution headers.
+	Identity *Identity `json:"-"`
+	// Transport selects a preferred transport; GOAT rejects "websocket".
+	Transport Transport `json:"transport,omitempty"`
+	// TimeoutMs caps the provider request duration when the adapter supports it.
+	TimeoutMs int `json:"timeout_ms,omitempty"`
+	// MaxRetries caps client-side retries when the adapter supports it.
+	MaxRetries int `json:"max_retries,omitempty"`
+	// MaxRetryDelayMs caps provider-requested retry delays. Adapters that rely
+	// on SDK retries ignore it.
+	MaxRetryDelayMs int `json:"max_retry_delay_ms,omitempty"`
+	// SamplingParams is merged into OpenAI-compatible request bodies.
+	SamplingParams map[string]any `json:"sampling_params,omitempty"`
 }
 
 // Request is one provider-neutral model turn.
