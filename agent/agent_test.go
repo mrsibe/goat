@@ -836,7 +836,7 @@ func TestToolUpdatesFinishBeforeToolEnd(t *testing.T) {
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{streamTool}})
 	log := subscribe(a)
 	var once sync.Once
-	a.Subscribe(func(event agent.Event) {
+	a.Subscribe(func(event agent.Event, _ context.Context) {
 		if event.Type == agent.EventToolUpdate {
 			once.Do(func() { close(inListener) })
 			<-releaseListener
@@ -1270,14 +1270,14 @@ func TestSubscribeOrderAndUnsubscribe(t *testing.T) {
 	a := newAgent(t, agent.Config{Model: model})
 	var order []string
 	var mu sync.Mutex
-	unsubscribeFirst := a.Subscribe(func(event agent.Event) {
+	unsubscribeFirst := a.Subscribe(func(event agent.Event, _ context.Context) {
 		if event.Type == agent.EventAgentStart {
 			mu.Lock()
 			order = append(order, "first")
 			mu.Unlock()
 		}
 	})
-	a.Subscribe(func(event agent.Event) {
+	a.Subscribe(func(event agent.Event, _ context.Context) {
 		if event.Type == agent.EventAgentStart {
 			mu.Lock()
 			order = append(order, "second")
@@ -1443,7 +1443,7 @@ type eventLog struct {
 
 func subscribe(a *agent.Agent) *eventLog {
 	log := &eventLog{}
-	a.Subscribe(func(event agent.Event) {
+	a.Subscribe(func(event agent.Event, _ context.Context) {
 		log.mu.Lock()
 		log.events = append(log.events, event)
 		log.mu.Unlock()

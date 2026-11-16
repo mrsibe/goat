@@ -78,6 +78,10 @@ type Config struct {
 	PrepareRequest  PrepareRequest
 	PrepareNextTurn PrepareNextTurn
 	FinishTurn      FinishTurn
+	// GetAPIKey resolves a provider credential before each request. It is
+	// called with the model's provider id; an empty key leaves the configured
+	// credential unchanged.
+	GetAPIKey func(provider string) (string, error)
 }
 
 // Agent owns a mutable transcript, tool set, model, and pending input queues.
@@ -106,11 +110,12 @@ type Agent struct {
 	prepareRequest    PrepareRequest
 	prepareNextTurn   PrepareNextTurn
 	finishTurn        FinishTurn
+	getAPIKey         func(provider string) (string, error)
 	thinkingLevel     ThinkingLevel
 	thinkingBudgets   map[ThinkingLevel]int
 	sessionID         string
 
-	listeners      map[uint64]func(Event)
+	listeners      map[uint64]func(Event, context.Context)
 	nextListenerID uint64
 
 	active           *activeRun
@@ -212,10 +217,11 @@ func New(config Config) (*Agent, error) {
 		prepareRequest:    config.PrepareRequest,
 		prepareNextTurn:   config.PrepareNextTurn,
 		finishTurn:        config.FinishTurn,
+		getAPIKey:         config.GetAPIKey,
 		thinkingLevel:     thinkingLevel,
 		thinkingBudgets:   budgets,
 		sessionID:         config.SessionID,
-		listeners:         make(map[uint64]func(Event)),
+		listeners:         make(map[uint64]func(Event, context.Context)),
 		pendingToolCalls:  make(map[string]struct{}),
 	}, nil
 }
@@ -231,7 +237,7 @@ func validThinkingLevel(level ThinkingLevel) bool {
 
 // Subscribe registers a synchronous event listener and returns an unsubscribe
 // function. Listeners run in registration order and are part of run settlement.
-func (a *Agent) Subscribe(listener func(Event)) func() {
+func (a *Agent) Subscribe(listener func(Event, context.Context)) func() {
 	if listener == nil {
 		return func() {}
 	}
@@ -674,14 +680,18 @@ func (a *Agent) emit(event Event) {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	listeners := make([]func(Event), 0, len(ids))
+	listeners := make([]func(Event, context.Context), 0, len(ids))
 	for _, id := range ids {
 		listeners = append(listeners, a.listeners[id])
+	}
+	runCtx := context.Background()
+	if a.active != nil && a.active.ctx != nil {
+		runCtx = a.active.ctx
 	}
 	a.mu.Unlock()
 
 	for _, listener := range listeners {
-		listener(event)
+		listener(event, runCtx)
 	}
 }
 
@@ -813,13 +823,23 @@ func (a *Agent) runLoop(
 		}
 
 		result.Steps++
+		options := a.requestOptionsFor(thinking)
+		if a.getAPIKey != nil {
+			key, keyErr := a.getAPIKey(model.Info().Provider)
+			if keyErr != nil {
+				return fail(fmt.Errorf("agent: resolve api key: %w", keyErr), !assistantEmitted)
+			}
+			if key != "" {
+				options.APIKey = key
+			}
+		}
 		assistant, stopReason, usage, streamErr := a.runModelTurn(
 			ctx,
 			result.Steps,
 			model,
 			requestMessages,
 			specs,
-			a.requestOptionsFor(thinking),
+			options,
 			thinking,
 		)
 		assistantEmitted = true

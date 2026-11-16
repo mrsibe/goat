@@ -55,7 +55,7 @@ func run() error {
 
 	lastStep := 0
 	streamed := false
-	assistant.Subscribe(func(event agent.Event) {
+	assistant.Subscribe(func(event agent.Event, _ context.Context) {
 		switch event.Type {
 		case agent.EventMessageDelta:
 			if event.Step != lastStep {

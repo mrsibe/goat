@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -229,7 +230,7 @@ func TestResponsesSendsAzurePathAndReportsAPI(t *testing.T) {
 
 func TestResponsesNilProvider(t *testing.T) {
 	var provider *ResponsesProvider
-	if provider.Info() != (ai.ModelInfo{}) {
+	if !reflect.DeepEqual(provider.Info(), ai.ModelInfo{}) {
 		t.Fatalf("info = %+v", provider.Info())
 	}
 	if _, err := provider.Stream(context.Background(), ai.Request{}); err == nil {

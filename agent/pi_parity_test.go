@@ -894,3 +894,91 @@ func TestPiParityNestedToolCalls(t *testing.T) {
 		t.Fatal("nested calls must be complete")
 	}
 }
+
+// pi: "Resolves an API key dynamically for each LLM call."
+func TestPiParityGetAPIKeyPerRequest(t *testing.T) {
+	model := faux.New(
+		piParityToolTurn(piParityToolCall(0, "call_1", "echo", `{}`)),
+		piParityTextTurn("done"),
+	)
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
+		return "ok", nil
+	})
+	keys := []string{"key-one", "key-two"}
+	index := 0
+	a := newAgent(t, agent.Config{
+		Model: model,
+		Tools: []agent.Tool{echo},
+		GetAPIKey: func(provider string) (string, error) {
+			if provider == "" {
+				t.Fatalf("provider must not be empty")
+			}
+			key := keys[index]
+			index++
+			return key, nil
+		},
+	})
+	if _, err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.Requests[0].Options.APIKey; got != "key-one" {
+		t.Fatalf("first key = %q", got)
+	}
+	if got := model.Requests[1].Options.APIKey; got != "key-two" {
+		t.Fatalf("second key = %q", got)
+	}
+
+	failing := newAgent(t, agent.Config{
+		Model: faux.New(piParityTextTurn("never")),
+		GetAPIKey: func(string) (string, error) {
+			return "", errors.New("no credential")
+		},
+	})
+	if _, err := failing.Prompt(context.Background(), "go"); err == nil || !strings.Contains(err.Error(), "no credential") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// pi: subscribers receive the active run signal.
+func TestPiParitySubscriberReceivesRunContext(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	model := faux.New(
+		piParityToolTurn(piParityToolCall(0, "call_1", "block", `{}`)),
+		piParityTextTurn("done"),
+	)
+	block := agent.NewTextTool(agent.ToolSpec{Name: "block"}, func(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
+		once.Do(func() { close(started) })
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{block}})
+
+	var runCtx context.Context
+	a.Subscribe(func(_ agent.Event, ctx context.Context) {
+		runCtx = ctx
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = a.Prompt(context.Background(), "go")
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tool did not start")
+	}
+	if runCtx == nil {
+		t.Fatal("subscriber did not receive a context")
+	}
+	a.Abort()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not finish")
+	}
+	if runCtx.Err() == nil {
+		t.Fatal("run context must be canceled after abort")
+	}
+}
