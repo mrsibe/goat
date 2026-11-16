@@ -982,3 +982,177 @@ func TestPiParitySubscriberReceivesRunContext(t *testing.T) {
 		t.Fatal("run context must be canceled after abort")
 	}
 }
+
+// pi: "one sequential tool among many forces the whole batch to run sequentially"
+func TestPiParityOneSequentialToolForcesSequentialBatch(t *testing.T) {
+	model := faux.New(
+		piParityToolTurn(
+			piParityToolCall(0, "call_seq", "seq", `{}`),
+			piParityToolCall(1, "call_other", "other", `{}`),
+		),
+		piParityTextTurn("done"),
+	)
+	otherStarted := make(chan struct{})
+	overlapped := make(chan bool, 1)
+	seq := agent.NewTextTool(agent.ToolSpec{
+		Name:          "seq",
+		ExecutionMode: agent.ToolExecutionSequential,
+	}, func(context.Context, string, json.RawMessage) (string, error) {
+		select {
+		case <-otherStarted:
+			overlapped <- true
+		case <-time.After(100 * time.Millisecond):
+			overlapped <- false
+		}
+		return "seq result", nil
+	})
+	var once sync.Once
+	other := agent.NewTextTool(agent.ToolSpec{Name: "other"}, func(context.Context, string, json.RawMessage) (string, error) {
+		once.Do(func() { close(otherStarted) })
+		return "other result", nil
+	})
+	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{seq, other}})
+
+	if _, err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if <-overlapped {
+		t.Fatal("a tool declaring sequential execution ran concurrently with another call")
+	}
+}
+
+// pi: "emits tool_execution_end as each call of a parallel batch settles"
+func TestPiParityParallelToolEndEmittedOnCompletion(t *testing.T) {
+	model := faux.New(
+		piParityToolTurn(
+			piParityToolCall(0, "call_slow", "slow", `{}`),
+			piParityToolCall(1, "call_fast", "fast", `{}`),
+		),
+		piParityTextTurn("done"),
+	)
+	slowStarted := make(chan struct{})
+	fastEnded := make(chan struct{})
+	slowOutcome := make(chan bool, 1)
+	slow := agent.NewTextTool(agent.ToolSpec{Name: "slow"}, func(_ context.Context, _ string, _ json.RawMessage) (string, error) {
+		close(slowStarted)
+		// The fast call's end event must arrive while this call is still running.
+		select {
+		case <-fastEnded:
+			slowOutcome <- true
+		case <-time.After(2 * time.Second):
+			slowOutcome <- false
+		}
+		return "slow result", nil
+	})
+	fast := agent.NewTextTool(agent.ToolSpec{Name: "fast"}, func(_ context.Context, _ string, _ json.RawMessage) (string, error) {
+		select {
+		case <-slowStarted:
+			return "fast result", nil
+		case <-time.After(2 * time.Second):
+			return "fast result", nil
+		}
+	})
+	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{slow, fast}})
+	a.Subscribe(func(event agent.Event, _ context.Context) {
+		if event.Type == agent.EventToolExecutionEnd && event.ToolCall != nil && event.ToolCall.Name == "fast" {
+			close(fastEnded)
+		}
+	})
+
+	if _, err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case seen := <-slowOutcome:
+		if !seen {
+			t.Fatal("tool_execution_end for the fast call waited for the slow call to finish")
+		}
+	default:
+		t.Fatal("slow tool did not observe the fast call's end event")
+	}
+}
+
+// pi: "answers every tool call of a sequential batch aborted mid-execution"
+func TestPiParityAbortDuringToolExecutionAnswersEveryCall(t *testing.T) {
+	var a *agent.Agent
+	model := faux.New(
+		piParityToolTurn(
+			piParityToolCall(0, "call_1", "one", `{}`),
+			piParityToolCall(1, "call_2", "two", `{}`),
+			piParityToolCall(2, "call_3", "three", `{}`),
+		),
+		piParityTextTurn("done"),
+	)
+	one := agent.NewTextTool(agent.ToolSpec{Name: "one"}, func(context.Context, string, json.RawMessage) (string, error) {
+		return "one", nil
+	})
+	two := agent.NewTextTool(agent.ToolSpec{Name: "two"}, func(context.Context, string, json.RawMessage) (string, error) {
+		a.Abort()
+		return "two", nil
+	})
+	three := agent.NewTextTool(agent.ToolSpec{Name: "three"}, func(context.Context, string, json.RawMessage) (string, error) {
+		return "three", nil
+	})
+	a = newAgent(t, agent.Config{
+		Model:         model,
+		Tools:         []agent.Tool{one, two, three},
+		ToolExecution: agent.ToolExecutionSequential,
+	})
+
+	result, err := a.Prompt(context.Background(), "go")
+	if err == nil {
+		t.Fatal("expected the run to end with an abort error")
+	}
+	for _, id := range []string{"call_1", "call_2", "call_3"} {
+		message := findToolMessage(result.Messages, id)
+		if message == nil {
+			t.Fatalf("tool call %s has no result: %+v", id, result.Messages)
+		}
+		if id == "call_3" && !message.IsError {
+			t.Fatalf("tool call %s should be an error result: %+v", id, message)
+		}
+	}
+}
+
+// pi: "mutated beforeToolCall args are passed to the tool without revalidation"
+func TestPiParityBeforeToolCallArgsMutationReachesTool(t *testing.T) {
+	model := faux.New(
+		piParityToolTurn(piParityToolCall(0, "call_1", "echo", `{"value":"original"}`)),
+		piParityTextTurn("done"),
+	)
+	parameters := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"value": map[string]any{"type": "string"}},
+	}
+	var executedWith string
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo", Parameters: parameters}, func(_ context.Context, _ string, args json.RawMessage) (string, error) {
+		executedWith = string(args)
+		return executedWith, nil
+	})
+	a := newAgent(t, agent.Config{
+		Model: model,
+		Tools: []agent.Tool{echo},
+		BeforeToolCall: func(_ context.Context, call agent.BeforeToolCallContext) (*agent.BeforeToolCallResult, error) {
+			if args, ok := call.Args.(map[string]any); ok {
+				args["value"] = "mutated"
+			}
+			return nil, nil
+		},
+	})
+	log := subscribe(a)
+
+	if _, err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(executedWith, `"mutated"`) {
+		t.Fatalf("tool executed with %s, want the hook's mutated arguments", executedWith)
+	}
+	// pi keeps the original arguments on the call, so events still report them.
+	for _, event := range log.snapshot() {
+		if event.Type == agent.EventToolEnd && event.ToolCall != nil && event.ToolCall.Name == "echo" {
+			if !strings.Contains(string(event.ToolCall.Arguments), `"original"`) {
+				t.Fatalf("tool_execution_end args = %s, want the original arguments", event.ToolCall.Arguments)
+			}
+		}
+	}
+}

@@ -69,8 +69,9 @@ func RunToolCall(ctx context.Context, call ai.ToolCall, options RunToolCallOptio
 			Name:      call.Name,
 			Arguments: arguments,
 		},
-		tool: tool,
-		args: parsed,
+		tool:     tool,
+		args:     parsed,
+		execArgs: arguments,
 	}
 	if options.BeforeToolCall != nil {
 		decision, hookErr := options.BeforeToolCall(ctx, BeforeToolCallContext{
@@ -96,6 +97,13 @@ func RunToolCall(ctx context.Context, call ai.ToolCall, options RunToolCallOptio
 			outcome.IsError = true
 			return outcome
 		}
+		// Mirrors prepareToolCall: hook mutations of the validated arguments are
+		// what the tool executes with.
+		encoded, marshalErr := json.Marshal(parsed)
+		if marshalErr != nil {
+			return failToolCall(outcome, fmt.Sprintf("invalid arguments for tool %q: %s", call.Name, marshalErr))
+		}
+		prepared.execArgs = encoded
 	}
 	if ctx.Err() != nil {
 		return failToolCall(outcome, "Operation aborted")
@@ -119,7 +127,7 @@ func executeToolSafely(ctx context.Context, prepared preparedToolCall) (result T
 			err = nil
 		}
 	}()
-	result, err = prepared.tool.Execute(ctx, prepared.call.ID, ai.CloneRawMessage(prepared.call.Arguments), nil)
+	result, err = prepared.tool.Execute(ctx, prepared.call.ID, ai.CloneRawMessage(prepared.execArguments()), nil)
 	if err != nil {
 		return ToolResult{}, err
 	}

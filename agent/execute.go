@@ -17,6 +17,18 @@ type preparedToolCall struct {
 	tool      Tool
 	args      any
 	immediate *ToolResult
+	// execArgs is what the tool executes with: the validated arguments after
+	// beforeToolCall mutations. Events and afterToolCall keep call.Arguments.
+	execArgs json.RawMessage
+}
+
+// execArguments returns the arguments to execute with, falling back to the
+// call's own arguments when no hook rewrote them.
+func (p preparedToolCall) execArguments() json.RawMessage {
+	if p.execArgs != nil {
+		return p.execArgs
+	}
+	return p.call.Arguments
 }
 
 type executedToolCall struct {
@@ -85,9 +97,6 @@ func (a *Agent) executeToolCallsSequential(
 		a.emitToolEnd(prepared.call, result, durationMs, step)
 		results = append(results, toolResultMessage(prepared.call, result, durationMs))
 		finalized = append(finalized, result)
-		if ctx.Err() != nil {
-			break
-		}
 	}
 	return results, allToolsTerminate(finalized)
 }
@@ -117,7 +126,12 @@ func (a *Agent) executeToolCallsParallel(
 
 	for index, prepared := range preparedCalls {
 		if prepared.immediate != nil {
-			completed <- completion{index: index, result: prepared.immediate.clone()}
+			// pi finalizes a blocked or unknown call immediately, before the other
+			// calls of the batch run.
+			result := prepared.immediate.clone()
+			a.emitToolEnd(prepared.call, result, 0, step)
+			finalized[index] = result
+			results[index] = toolResultMessage(prepared.call, result, 0)
 			continue
 		}
 		wait.Add(1)
@@ -132,9 +146,12 @@ func (a *Agent) executeToolCallsParallel(
 			completed <- completion{index: index, result: result, durationMs: durationMs}
 		}(index, prepared)
 	}
-	wait.Wait()
-	close(completed)
-
+	// Drain as calls settle so each tool_execution_end is emitted when its call
+	// finishes, like pi, instead of after the slowest call of the batch returns.
+	go func() {
+		wait.Wait()
+		close(completed)
+	}()
 	for item := range completed {
 		a.emitToolEnd(calls[item.index], item.result, item.durationMs, step)
 		finalized[item.index] = item.result
@@ -153,6 +170,13 @@ func (a *Agent) prepareToolCall(
 ) preparedToolCall {
 	callCopy := ai.CloneToolCall(call)
 	a.emit(Event{Type: EventToolStart, Step: step, ToolCall: &callCopy})
+
+	// pi skips preparation and the hooks once the run is aborted, but still
+	// records a result so no call is left unanswered.
+	if ctx.Err() != nil {
+		result := ErrorResult("Operation aborted")
+		return preparedToolCall{call: callCopy, immediate: &result}
+	}
 
 	tool, spec, ok := registry.get(call.Name)
 	if !ok {
@@ -191,6 +215,7 @@ func (a *Agent) prepareToolCall(
 		result := ErrorResult(fmt.Sprintf("invalid arguments for tool %q: %s", call.Name, err))
 		return preparedToolCall{call: callCopy, immediate: &result}
 	}
+	execArgs := ai.CloneRawMessage(callCopy.Arguments)
 	if a.beforeToolCall != nil {
 		decision, err := a.beforeToolCall(ctx, BeforeToolCallContext{
 			AssistantMessage: ai.CloneMessage(assistant),
@@ -215,12 +240,20 @@ func (a *Agent) prepareToolCall(
 			result.Terminate = decision.Terminate
 			return preparedToolCall{call: callCopy, immediate: &result}
 		}
+		// pi passes the same validated arguments object to the hook and to the tool,
+		// so mutations made by the hook are what the tool executes with.
+		encoded, marshalErr := json.Marshal(args)
+		if marshalErr != nil {
+			result := ErrorResult(fmt.Sprintf("invalid arguments for tool %q: %s", call.Name, marshalErr))
+			return preparedToolCall{call: callCopy, immediate: &result}
+		}
+		execArgs = encoded
 	}
 	if ctx.Err() != nil {
 		result := ErrorResult("Operation aborted")
 		return preparedToolCall{call: callCopy, immediate: &result}
 	}
-	return preparedToolCall{call: callCopy, tool: tool, args: args}
+	return preparedToolCall{call: callCopy, tool: tool, args: args, execArgs: execArgs}
 }
 
 func (a *Agent) executePreparedTool(ctx context.Context, prepared preparedToolCall, step int) (executed executedToolCall) {
@@ -273,7 +306,7 @@ func (a *Agent) executePreparedTool(ctx context.Context, prepared preparedToolCa
 	result, err := prepared.tool.Execute(
 		toolCtx,
 		prepared.call.ID,
-		ai.CloneRawMessage(prepared.call.Arguments),
+		ai.CloneRawMessage(prepared.execArguments()),
 		update,
 	)
 	if nested := recorder.snapshot(); nested != nil {
