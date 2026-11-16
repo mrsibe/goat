@@ -115,8 +115,7 @@ func TestResponsesMapsHistoryToolsAndStreaming(t *testing.T) {
 		ID: "call_1", ItemID: "fc_prev", Name: "get_weather",
 		Arguments: json.RawMessage(`{"city":"北京"}`),
 	}
-	assistant := ai.Message{
-		Role: ai.RoleAssistant,
+	assistant := &ai.AssistantMessage{
 		Content: []ai.ContentBlock{
 			{Type: ai.BlockText, Text: "checking", TextSignature: `{"id":"msg_prev","phase":"final_answer"}`},
 			{Type: ai.BlockToolCall, ToolCall: &call},
@@ -171,9 +170,9 @@ func TestResponsesMapsHistoryToolsAndStreaming(t *testing.T) {
 		t.Fatalf("tool delta = %+v", events[5])
 	}
 	usage := events[7].Usage
-	if usage == nil || usage.PromptTokens != 10 || usage.CompletionTokens != 5 ||
-		usage.CacheReadTokens != 2 || usage.CacheWriteTokens != 3 ||
-		usage.ReasoningTokens != 1 || usage.TotalTokens != 15 {
+	if usage == nil || usage.Input != 10 || usage.Output != 5 ||
+		usage.CacheRead != 2 || usage.CacheWrite != 3 ||
+		usage.Reasoning != 1 || usage.TotalTokens != 15 {
 		t.Fatalf("usage = %+v", usage)
 	}
 	if events[8].StopReason != ai.StopReasonToolCalls || events[8].Message == nil {
@@ -184,7 +183,7 @@ func TestResponsesMapsHistoryToolsAndStreaming(t *testing.T) {
 		string(calls[0].Arguments) != `{"city":"北京"}` {
 		t.Fatalf("done tool calls = %+v", calls)
 	}
-	if got := events[8].Message.Content[0].TextSignature; got != `{"id":"msg_1","phase":"final_answer"}` {
+	if got := ai.AsAssistant(events[8].Message).Content[0].TextSignature; got != `{"id":"msg_1","phase":"final_answer"}` {
 		t.Fatalf("text signature = %q", got)
 	}
 
@@ -254,19 +253,18 @@ func TestResponsesMapsUserAndToolResultImages(t *testing.T) {
 	}
 	stream, err := provider.Stream(context.Background(), ai.Request{
 		Messages: []ai.Message{
-			{
-				Role: ai.RoleUser,
+			&ai.UserMessage{
 				Content: []ai.ContentBlock{
 					{Type: ai.BlockText, Text: "look"},
-					{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MediaType: "image/png"}},
+					{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MimeType: "image/png"}},
 				},
 			},
-			ai.ToolResultMessage(
+			ai.NewToolResultMessage(
 				"call_1",
 				"screenshot",
 				[]ai.ContentBlock{{
 					Type:  ai.BlockImage,
-					Image: &ai.ImageContent{Data: "d29ybGQ=", MediaType: "image/jpeg"},
+					Image: &ai.ImageContent{Data: "d29ybGQ=", MimeType: "image/jpeg"},
 				}},
 				false,
 			),

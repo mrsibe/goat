@@ -60,13 +60,13 @@ func (p *ResponsesProvider) params(request ai.Request) (responses.ResponseNewPar
 	var instructions []string
 	input := make([]responses.ResponseInputItemUnionParam, 0, len(request.Messages))
 	for _, message := range request.Messages {
-		switch message.Role {
-		case ai.RoleSystem:
-			if text := message.Text(); text != "" {
+		switch typed := message.(type) {
+		case *ai.SystemMessage:
+			if text := ai.RenderSystemMessage(*typed); text != "" {
 				instructions = append(instructions, text)
 			}
-		case ai.RoleUser:
-			content, err := responsesUserContent(message)
+		case *ai.UserMessage:
+			content, err := responsesUserContent(typed)
 			if err != nil {
 				return responses.ResponseNewParams{}, err
 			}
@@ -74,25 +74,25 @@ func (p *ResponsesProvider) params(request ai.Request) (responses.ResponseNewPar
 				content,
 				responses.EasyInputMessageRoleUser,
 			))
-		case ai.RoleAssistant:
-			assistantInput, err := responsesAssistantInput(message)
+		case *ai.AssistantMessage:
+			assistantInput, err := responsesAssistantInput(typed)
 			if err != nil {
 				return responses.ResponseNewParams{}, err
 			}
 			input = append(input, assistantInput...)
-		case ai.RoleTool:
-			if message.ToolCallID == "" {
+		case *ai.ToolResultMessage:
+			if typed.ToolCallID == "" {
 				return responses.ResponseNewParams{}, errors.New("openai: tool message is missing its tool call id")
 			}
-			output, err := responsesToolOutput(message)
+			output, err := responsesToolOutput(typed)
 			if err != nil {
 				return responses.ResponseNewParams{}, err
 			}
 			item := responses.ResponseInputItemParamOfFunctionCallOutput(output)
-			item.OfFunctionCallOutput.CallID = param.NewOpt(message.ToolCallID)
+			item.OfFunctionCallOutput.CallID = param.NewOpt(typed.ToolCallID)
 			input = append(input, item)
 		default:
-			return responses.ResponseNewParams{}, fmt.Errorf("openai: unsupported message role %q", message.Role)
+			return responses.ResponseNewParams{}, fmt.Errorf("openai: unsupported message type %T", message)
 		}
 	}
 
@@ -154,7 +154,7 @@ func (p *ResponsesProvider) params(request ai.Request) (responses.ResponseNewPar
 	return params, nil
 }
 
-func responsesUserContent(message ai.Message) (responses.ResponseInputMessageContentListParam, error) {
+func responsesUserContent(message *ai.UserMessage) (responses.ResponseInputMessageContentListParam, error) {
 	content := make(responses.ResponseInputMessageContentListParam, 0, len(message.Content))
 	for _, block := range message.Content {
 		switch block.Type {
@@ -182,7 +182,7 @@ func responsesUserContent(message ai.Message) (responses.ResponseInputMessageCon
 	return content, nil
 }
 
-func responsesAssistantInput(message ai.Message) ([]responses.ResponseInputItemUnionParam, error) {
+func responsesAssistantInput(message *ai.AssistantMessage) ([]responses.ResponseInputItemUnionParam, error) {
 	input := make([]responses.ResponseInputItemUnionParam, 0, len(message.Content))
 	for _, block := range message.Content {
 		switch block.Type {
@@ -249,7 +249,7 @@ func responsesAssistantInput(message ai.Message) ([]responses.ResponseInputItemU
 	return input, nil
 }
 
-func responsesToolOutput(message ai.Message) (responses.ResponseFunctionCallOutputItemListParam, error) {
+func responsesToolOutput(message *ai.ToolResultMessage) (responses.ResponseFunctionCallOutputItemListParam, error) {
 	items := make(responses.ResponseFunctionCallOutputItemListParam, 0, len(message.Content))
 	for _, block := range message.Content {
 		switch block.Type {
@@ -673,12 +673,12 @@ func (s *responsesStream) normalizeError(err error) error {
 
 func responseUsage(usage responses.ResponseUsage) ai.Usage {
 	return ai.Usage{
-		PromptTokens:     usage.InputTokens,
-		CompletionTokens: usage.OutputTokens,
-		CacheReadTokens:  usage.InputTokensDetails.CachedTokens,
-		CacheWriteTokens: usage.InputTokensDetails.CacheWriteTokens,
-		ReasoningTokens:  usage.OutputTokensDetails.ReasoningTokens,
-		TotalTokens:      usage.TotalTokens,
+		Input:       usage.InputTokens,
+		Output:      usage.OutputTokens,
+		CacheRead:   usage.InputTokensDetails.CachedTokens,
+		CacheWrite:  usage.InputTokensDetails.CacheWriteTokens,
+		Reasoning:   usage.OutputTokensDetails.ReasoningTokens,
+		TotalTokens: usage.TotalTokens,
 	}
 }
 

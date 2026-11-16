@@ -21,7 +21,7 @@ func TestPromptDirectAnswer(t *testing.T) {
 		{Type: ai.EventStart},
 		{Type: ai.EventTextDelta, TextDelta: "你"},
 		{Type: ai.EventTextDelta, TextDelta: "好"},
-		{Type: ai.EventUsage, Usage: &ai.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}},
+		{Type: ai.EventUsage, Usage: &ai.Usage{Input: 10, Output: 2, TotalTokens: 12}},
 		{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 	}})
 	a := newAgent(t, agent.Config{Model: model, SystemPrompt: "system"})
@@ -190,7 +190,7 @@ func TestAbortDuringToolPreflightPreventsExecution(t *testing.T) {
 	}
 	var observation string
 	for _, message := range result.Messages {
-		if message.Role == ai.RoleTool {
+		if message.Role() == ai.RoleTool {
 			observation = message.Text()
 		}
 	}
@@ -243,7 +243,7 @@ func TestToolExecutionAndContinue(t *testing.T) {
 		t.Fatalf("second request roles = %v", got)
 	}
 	toolResult := result.Messages[2]
-	if toolResult.Role != ai.RoleTool || toolResult.ToolCallID != "call_1" || toolResult.Text() != "sunny" {
+	if toolResult.Role() != ai.RoleTool || ai.AsToolResult(toolResult).ToolCallID != "call_1" || toolResult.Text() != "sunny" {
 		t.Fatalf("tool message = %+v", toolResult)
 	}
 	if !hasEvent(log.snapshot(), agent.EventToolStart) || !hasEvent(log.snapshot(), agent.EventToolEnd) {
@@ -316,17 +316,17 @@ func TestStreamingPreservesContentBlockOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	assistant := result.Messages[1]
-	if assistant.Role != ai.RoleAssistant || len(assistant.Content) != 3 {
+	if assistant.Role() != ai.RoleAssistant || len(ai.AsAssistant(assistant).Content) != 3 {
 		t.Fatalf("assistant = %+v", assistant)
 	}
 	want := []ai.BlockType{ai.BlockToolCall, ai.BlockText, ai.BlockThinking}
-	for i, block := range assistant.Content {
+	for i, block := range ai.AsAssistant(assistant).Content {
 		if block.Type != want[i] {
 			t.Fatalf("content[%d] = %q, want %q", i, block.Type, want[i])
 		}
 	}
-	if assistant.Content[1].Text != "after tool!" || assistant.Content[2].Thinking != "after text" {
-		t.Fatalf("content = %+v", assistant.Content)
+	if ai.AsAssistant(assistant).Content[1].Text != "after tool!" || ai.AsAssistant(assistant).Content[2].Thinking != "after text" {
+		t.Fatalf("content = %+v", ai.AsAssistant(assistant).Content)
 	}
 }
 
@@ -368,7 +368,7 @@ func TestToolErrorsAndPanicsAreObservations(t *testing.T) {
 				t.Fatal(err)
 			}
 			toolMessage := result.Messages[len(result.Messages)-2]
-			if !toolMessage.IsError || !strings.Contains(toolMessage.Text(), testCase.want) {
+			if !ai.AsToolResult(toolMessage).IsError || !strings.Contains(toolMessage.Text(), testCase.want) {
 				t.Fatalf("tool observation = %+v", toolMessage)
 			}
 		})
@@ -457,8 +457,7 @@ func TestUnknownAndInvalidToolCallsAreObservations(t *testing.T) {
 	call := ai.ToolCall{ID: "call_1", Name: "weather", Arguments: json.RawMessage(`{"city":123}`)}
 	model := faux.New(
 		faux.Turn{Events: []ai.Event{
-			{Type: ai.EventDone, Message: &ai.Message{
-				Role: ai.RoleAssistant,
+			{Type: ai.EventDone, Message: &ai.AssistantMessage{
 				Content: []ai.ContentBlock{{
 					Type: ai.BlockToolCall, ToolCall: &call,
 				}},
@@ -491,7 +490,7 @@ func TestUnknownAndInvalidToolCallsAreObservations(t *testing.T) {
 	if executed {
 		t.Fatal("invalid tool arguments were executed")
 	}
-	if toolMessage := result.Messages[2]; !toolMessage.IsError || !strings.Contains(toolMessage.Text(), "expected string") {
+	if toolMessage := result.Messages[2]; !ai.AsToolResult(toolMessage).IsError || !strings.Contains(toolMessage.Text(), "expected string") {
 		t.Fatalf("tool message = %+v", toolMessage)
 	}
 
@@ -510,7 +509,7 @@ func TestUnknownAndInvalidToolCallsAreObservations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if toolMessage := result.Messages[2]; !toolMessage.IsError || !strings.Contains(toolMessage.Text(), "unknown tool") {
+	if toolMessage := result.Messages[2]; !ai.AsToolResult(toolMessage).IsError || !strings.Contains(toolMessage.Text(), "unknown tool") {
 		t.Fatalf("tool message = %+v", toolMessage)
 	}
 }
@@ -556,15 +555,14 @@ func TestOutputLengthSemantics(t *testing.T) {
 	}
 
 	call := ai.ToolCall{ID: "call_1", Name: "weather", Arguments: json.RawMessage(`{"city":"北京"}`)}
-	truncated := ai.Message{
-		Role: ai.RoleAssistant,
+	truncated := &ai.AssistantMessage{
 		Content: []ai.ContentBlock{{
 			Type: ai.BlockToolCall, ToolCall: &call,
 		}},
 	}
 	model = faux.New(
 		faux.Turn{Events: []ai.Event{
-			{Type: ai.EventDone, Message: &truncated, StopReason: ai.StopReasonLength},
+			{Type: ai.EventDone, Message: truncated, StopReason: ai.StopReasonLength},
 		}},
 		faux.Turn{Events: []ai.Event{
 			{Type: ai.EventTextDelta, TextDelta: "recovered"},
@@ -584,7 +582,7 @@ func TestOutputLengthSemantics(t *testing.T) {
 	if executed || result.Answer != "recovered" || result.Steps != 2 {
 		t.Fatalf("result = %+v executed=%v", result, executed)
 	}
-	if toolMessage := result.Messages[2]; !toolMessage.IsError || !strings.Contains(toolMessage.Text(), "output token limit") {
+	if toolMessage := result.Messages[2]; !ai.AsToolResult(toolMessage).IsError || !strings.Contains(toolMessage.Text(), "output token limit") {
 		t.Fatalf("tool message = %+v", toolMessage)
 	}
 }
@@ -611,8 +609,8 @@ func TestModelAndStreamErrorsPreservePartialMessages(t *testing.T) {
 		{
 			Type:       ai.EventError,
 			Err:        streamErr,
-			Message:    &partial,
-			Usage:      &ai.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12},
+			Message:    partial,
+			Usage:      &ai.Usage{Input: 10, Output: 2, TotalTokens: 12},
 			StopReason: ai.StopReasonError,
 		},
 	}})
@@ -631,8 +629,7 @@ func TestModelAndStreamErrorsPreservePartialMessages(t *testing.T) {
 }
 
 func TestDoneMessageUsageAndThinkingSignature(t *testing.T) {
-	final := ai.Message{
-		Role: ai.RoleAssistant,
+	final := &ai.AssistantMessage{
 		Content: []ai.ContentBlock{
 			{Type: ai.BlockThinking, Thinking: "plan", ThinkingSignature: "sig"},
 			{Type: ai.BlockText, Text: "final"},
@@ -643,8 +640,8 @@ func TestDoneMessageUsageAndThinkingSignature(t *testing.T) {
 		{Type: ai.EventThinkingStart},
 		{Type: ai.EventThinkingDelta, ThinkingDelta: "plan"},
 		{Type: ai.EventThinkingEnd, Thinking: "plan"},
-		{Type: ai.EventDone, Message: &final, StopReason: ai.StopReasonStop, Usage: &ai.Usage{
-			PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12,
+		{Type: ai.EventDone, Message: final, StopReason: ai.StopReasonStop, Usage: &ai.Usage{
+			Input: 10, Output: 2, TotalTokens: 12,
 		}},
 	}})
 	a := newAgent(t, agent.Config{Model: model})
@@ -655,7 +652,7 @@ func TestDoneMessageUsageAndThinkingSignature(t *testing.T) {
 	if result.Answer != "final" || result.Usage.TotalTokens != 12 {
 		t.Fatalf("result = %+v", result)
 	}
-	if result.Messages[1].Thinking() != "plan" || result.Messages[1].Content[0].ThinkingSignature != "sig" {
+	if result.Messages[1].Thinking() != "plan" || ai.AsAssistant(result.Messages[1]).Content[0].ThinkingSignature != "sig" {
 		t.Fatalf("thinking message = %+v", result.Messages[1])
 	}
 }
@@ -703,7 +700,7 @@ func TestParallelToolExecutionPreservesModelOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Messages[2].ToolName != "slow" || result.Messages[3].ToolName != "fast" {
+	if ai.AsToolResult(result.Messages[2]).ToolName != "slow" || ai.AsToolResult(result.Messages[3]).ToolName != "fast" {
 		t.Fatalf("tool result order = %+v", result.Messages)
 	}
 }
@@ -958,7 +955,7 @@ func TestAfterToolCallContentReplacementClearsStructuredContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	toolMessage := result.Messages[2]
-	if toolMessage.Text() != "changed" || toolMessage.StructuredContent != nil {
+	if toolMessage.Text() != "changed" || ai.AsToolResult(toolMessage).StructuredContent != nil {
 		t.Fatalf("tool message = %+v", toolMessage)
 	}
 }
@@ -1016,9 +1013,9 @@ func TestFailureBeforeAssistantSynthesizesMessage(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "prepare failed") {
 		t.Fatalf("error = %v", err)
 	}
-	if len(result.Messages) != 2 || result.Messages[1].Role != ai.RoleAssistant ||
-		result.Messages[1].StopReason != ai.StopReasonError ||
-		!strings.Contains(result.Messages[1].ErrorMessage, "prepare failed") {
+	if len(result.Messages) != 2 || result.Messages[1].Role() != ai.RoleAssistant ||
+		ai.AsAssistant(result.Messages[1]).StopReason != ai.StopReasonError ||
+		!strings.Contains(ai.AsAssistant(result.Messages[1]).ErrorMessage, "prepare failed") {
 		t.Fatalf("result messages = %+v", result.Messages)
 	}
 	types := eventTypes(log.snapshot())
@@ -1322,10 +1319,10 @@ func TestToolResultDetailsStructuredContentAndUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	toolMessage := result.Messages[2]
-	if string(toolMessage.Details) != `{"audited":true}` ||
-		string(toolMessage.StructuredContent) != `{"value":42}` ||
-		toolMessage.Usage == nil || toolMessage.Usage.TotalTokens != 3 ||
-		toolMessage.DurationMs < 0 {
+	if string(ai.AsToolResult(toolMessage).Details) != `{"audited":true}` ||
+		string(ai.AsToolResult(toolMessage).StructuredContent) != `{"value":42}` ||
+		ai.AsToolResult(toolMessage).Usage == nil || ai.AsToolResult(toolMessage).Usage.TotalTokens != 3 ||
+		ai.AsToolResult(toolMessage).DurationMs < 0 {
 		t.Fatalf("tool message = %+v", toolMessage)
 	}
 }
@@ -1344,7 +1341,7 @@ func TestToolResultImagesAndInvalidContent(t *testing.T) {
 	screenshot := agent.NewTool(agent.ToolSpec{Name: "screenshot"}, func(context.Context, ai.ToolCall) (agent.ToolResult, error) {
 		return agent.ToolResult{Content: []ai.ContentBlock{
 			{Type: ai.BlockText, Text: "preview"},
-			{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MediaType: "image/png"}},
+			{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MimeType: "image/png"}},
 		}}, nil
 	})
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{screenshot}})
@@ -1353,7 +1350,7 @@ func TestToolResultImagesAndInvalidContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	toolMessage := result.Messages[2]
-	if toolMessage.IsError || len(toolMessage.Content) != 2 || toolMessage.Content[1].Image == nil {
+	if ai.AsToolResult(toolMessage).IsError || len(ai.AsToolResult(toolMessage).Content) != 2 || ai.AsToolResult(toolMessage).Content[1].Image == nil {
 		t.Fatalf("tool message = %+v", toolMessage)
 	}
 
@@ -1361,9 +1358,9 @@ func TestToolResultImagesAndInvalidContent(t *testing.T) {
 		return agent.ToolResult{Content: []ai.ContentBlock{{
 			Type: ai.BlockImage,
 			Image: &ai.ImageContent{
-				Data:      "aGVsbG8=",
-				URL:       "https://example.test/image.png",
-				MediaType: "image/png",
+				Data:     "aGVsbG8=",
+				URL:      "https://example.test/image.png",
+				MimeType: "image/png",
 			},
 		}}}, nil
 	})
@@ -1382,7 +1379,7 @@ func TestToolResultImagesAndInvalidContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if toolMessage := result.Messages[2]; !toolMessage.IsError || !strings.Contains(toolMessage.Text(), "exactly one") {
+	if toolMessage := result.Messages[2]; !ai.AsToolResult(toolMessage).IsError || !strings.Contains(toolMessage.Text(), "exactly one") {
 		t.Fatalf("tool message = %+v", toolMessage)
 	}
 }
@@ -1394,15 +1391,14 @@ func TestStreamedArgumentErrorIsObservation(t *testing.T) {
 		Arguments:      json.RawMessage(`{}`),
 		ArgumentsError: "tool call arguments are not valid JSON",
 	}
-	assistantCall := ai.Message{
-		Role: ai.RoleAssistant,
+	assistantCall := &ai.AssistantMessage{
 		Content: []ai.ContentBlock{{
 			Type: ai.BlockToolCall, ToolCall: &call,
 		}},
 	}
 	model := faux.New(
 		faux.Turn{Events: []ai.Event{
-			{Type: ai.EventDone, Message: &assistantCall, StopReason: ai.StopReasonToolCalls},
+			{Type: ai.EventDone, Message: assistantCall, StopReason: ai.StopReasonToolCalls},
 		}},
 		faux.Turn{Events: []ai.Event{
 			{Type: ai.EventTextDelta, TextDelta: "recovered"},
@@ -1422,7 +1418,7 @@ func TestStreamedArgumentErrorIsObservation(t *testing.T) {
 	if executed {
 		t.Fatal("tool with invalid streamed arguments was executed")
 	}
-	if toolMessage := result.Messages[2]; !toolMessage.IsError || !strings.Contains(toolMessage.Text(), "not valid JSON") {
+	if toolMessage := result.Messages[2]; !ai.AsToolResult(toolMessage).IsError || !strings.Contains(toolMessage.Text(), "not valid JSON") {
 		t.Fatalf("tool message = %+v", toolMessage)
 	}
 }
@@ -1477,7 +1473,7 @@ func hasEvent(events []agent.Event, eventType agent.EventType) bool {
 func messageRoles(messages []ai.Message) []ai.Role {
 	roles := make([]ai.Role, len(messages))
 	for i, message := range messages {
-		roles[i] = message.Role
+		roles[i] = message.Role()
 	}
 	return roles
 }

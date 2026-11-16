@@ -40,8 +40,8 @@ func (e *ModelError) Error() string {
 	if e.Err != nil {
 		return e.Err.Error()
 	}
-	if e.Message.ErrorMessage != "" {
-		return e.Message.ErrorMessage
+	if assistant, ok := e.Message.(*ai.AssistantMessage); ok && assistant.ErrorMessage != "" {
+		return assistant.ErrorMessage
 	}
 	return "agent: model stopped with an error"
 }
@@ -84,7 +84,8 @@ type Agent struct {
 	model             ai.Model
 	tools             toolRegistry
 	messages          []ai.Message
-	baselineSystem    *ai.Message
+	baselineSystem    *ai.SystemMessage
+	declaredTools     []ai.ToolSpec
 	requestOptions    ai.RequestOptions
 	maxSteps          int
 	toolExecution     ToolExecutionMode
@@ -107,7 +108,7 @@ type Agent struct {
 
 	active           *activeRun
 	isStreaming      bool
-	streamingMessage *ai.Message
+	streamingMessage ai.Message
 	pendingToolCalls map[string]struct{}
 	errorMessage     string
 }
@@ -159,16 +160,22 @@ func New(config Config) (*Agent, error) {
 	}
 
 	messages := ai.CloneMessages(config.Messages)
-	var baseline *ai.Message
+	var baseline *ai.SystemMessage
 	if config.SystemPrompt != "" {
-		system := ai.TextMessage(ai.RoleSystem, config.SystemPrompt)
-		baseline = &system
+		baseline = ai.NewSystemMessage(config.SystemPrompt)
 	}
-	if len(messages) > 0 && messages[0].Role == ai.RoleSystem {
-		system := ai.CloneMessage(messages[0])
-		baseline = &system
-	} else if baseline != nil {
-		messages = append([]ai.Message{*baseline}, messages...)
+	if len(messages) > 0 {
+		if system, ok := messages[0].(*ai.SystemMessage); ok {
+			baseline = system
+		}
+	}
+	if baseline != nil {
+		baseline.ToolsAdded = toolSpecsToAI(tools.list())
+		if len(messages) == 0 || messages[0].Role() != ai.RoleSystem {
+			messages = append([]ai.Message{ai.CloneMessage(baseline)}, messages...)
+		} else {
+			messages[0] = ai.CloneMessage(baseline)
+		}
 	}
 
 	budgets := make(map[ThinkingLevel]int, len(config.ThinkingBudgets))
@@ -183,6 +190,7 @@ func New(config Config) (*Agent, error) {
 		tools:             tools,
 		messages:          messages,
 		baselineSystem:    baseline,
+		declaredTools:     toolSpecsToAI(tools.list()),
 		requestOptions:    config.RequestOptions,
 		maxSteps:          config.MaxSteps,
 		toolExecution:     toolExecution,
@@ -236,11 +244,7 @@ func (a *Agent) Prompt(ctx context.Context, input string, images ...ai.ImageCont
 		image := images[i]
 		content = append(content, ai.ContentBlock{Type: ai.BlockImage, Image: &image})
 	}
-	return a.PromptMessages(ctx, ai.Message{
-		Role:      ai.RoleUser,
-		Content:   content,
-		Timestamp: time.Now().UnixMilli(),
-	})
+	return a.PromptMessages(ctx, ai.NewUserMessage(content...))
 }
 
 // PromptMessages starts a run with one or more messages.
@@ -265,7 +269,7 @@ func (a *Agent) Continue(ctx context.Context) (Result, error) {
 	}
 	allSystem := true
 	for _, message := range messages {
-		if message.Role != ai.RoleSystem {
+		if message.Role() != ai.RoleSystem {
 			allSystem = false
 			break
 		}
@@ -274,7 +278,7 @@ func (a *Agent) Continue(ctx context.Context) (Result, error) {
 		return Result{}, ErrNoMessages
 	}
 	last := messages[len(messages)-1]
-	if last.Role != ai.RoleAssistant {
+	if last.Role() != ai.RoleAssistant {
 		return a.runMessages(ctx, nil, true, false, false)
 	}
 	return a.runMessages(ctx, nil, false, false, true)
@@ -373,7 +377,7 @@ func (a *Agent) Reset() error {
 	}
 	a.messages = nil
 	if a.baselineSystem != nil {
-		a.messages = []ai.Message{ai.CloneMessage(*a.baselineSystem)}
+		a.messages = []ai.Message{ai.CloneMessage(a.baselineSystem)}
 	}
 	a.steeringQueue = nil
 	a.followUpQueue = nil
@@ -399,8 +403,7 @@ func (a *Agent) State() State {
 		PendingToolCalls: make([]string, 0, len(a.pendingToolCalls)),
 	}
 	if a.streamingMessage != nil {
-		message := ai.CloneMessage(*a.streamingMessage)
-		state.StreamingMessage = &message
+		state.StreamingMessage = ai.CloneMessage(a.streamingMessage)
 	}
 	for id := range a.pendingToolCalls {
 		state.PendingToolCalls = append(state.PendingToolCalls, id)
@@ -593,17 +596,15 @@ func (a *Agent) emit(event Event) {
 	switch event.Type {
 	case EventMessageStart:
 		if event.Message != nil {
-			message := ai.CloneMessage(*event.Message)
-			a.streamingMessage = &message
+			a.streamingMessage = ai.CloneMessage(event.Message)
 		}
 	case EventMessageUpdate, EventMessageDelta, EventThinkingStart, EventThinkingDelta, EventThinkingEnd:
 		if event.Message != nil {
-			message := ai.CloneMessage(*event.Message)
-			a.streamingMessage = &message
+			a.streamingMessage = ai.CloneMessage(event.Message)
 		}
 	case EventMessageEnd:
 		if event.Message != nil {
-			a.messages = append(a.messages, ai.CloneMessage(*event.Message))
+			a.messages = append(a.messages, ai.CloneMessage(event.Message))
 		}
 		a.streamingMessage = nil
 	case EventToolStart:
@@ -615,8 +616,8 @@ func (a *Agent) emit(event Event) {
 			delete(a.pendingToolCalls, event.ToolCall.ID)
 		}
 	case EventTurnEnd:
-		if event.Message != nil && event.Message.Role == ai.RoleAssistant && event.Message.ErrorMessage != "" {
-			a.errorMessage = event.Message.ErrorMessage
+		if assistant, ok := event.Message.(*ai.AssistantMessage); ok && assistant.ErrorMessage != "" {
+			a.errorMessage = assistant.ErrorMessage
 		}
 	case EventAgentError:
 		if event.Error != "" {
@@ -642,10 +643,8 @@ func (a *Agent) emit(event Event) {
 }
 
 func (a *Agent) emitMessage(message ai.Message, step int) {
-	start := ai.CloneMessage(message)
-	a.emit(Event{Type: EventMessageStart, Step: step, Message: &start})
-	end := ai.CloneMessage(message)
-	a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+	a.emit(Event{Type: EventMessageStart, Step: step, Message: ai.CloneMessage(message)})
+	a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(message)})
 }
 
 func (a *Agent) runLoop(
@@ -683,14 +682,11 @@ func (a *Agent) runLoop(
 		assistantEmitted = false
 		if first {
 			a.emit(Event{Type: EventTurnStart, Step: 1})
+			initial := pending
 			if !continuation {
-				for _, message := range prompts {
-					a.emitMessage(message, 1)
-					currentContext.Messages = append(currentContext.Messages, ai.CloneMessage(message))
-					newMessages = append(newMessages, ai.CloneMessage(message))
-				}
+				initial = append(append([]ai.Message(nil), prompts...), pending...)
 			}
-			for _, message := range pending {
+			for _, message := range a.declareToolChanges(currentContext, initial) {
 				a.emitMessage(message, 1)
 				currentContext.Messages = append(currentContext.Messages, ai.CloneMessage(message))
 				newMessages = append(newMessages, ai.CloneMessage(message))
@@ -713,7 +709,7 @@ func (a *Agent) runLoop(
 				pending = a.drainSteering()
 			}
 			a.emit(Event{Type: EventTurnStart, Step: result.Steps + 1})
-			for _, message := range append(preparedMessages, pending...) {
+			for _, message := range a.declareToolChanges(currentContext, append(preparedMessages, pending...)) {
 				a.emitMessage(message, result.Steps+1)
 				currentContext.Messages = append(currentContext.Messages, ai.CloneMessage(message))
 				newMessages = append(newMessages, ai.CloneMessage(message))
@@ -767,6 +763,7 @@ func (a *Agent) runLoop(
 			requestMessages,
 			specs,
 			a.requestOptionsFor(thinking),
+			thinking,
 		)
 		assistantEmitted = true
 		result.Usage.Add(usage)
@@ -787,12 +784,12 @@ func (a *Agent) runLoop(
 			}
 			if a.finishTurn != nil {
 				if _, err := a.finishTurn(ctx, cloneTurnContext(turn)); err != nil {
-					a.emit(Event{Type: EventTurnEnd, Step: result.Steps, Message: &turn.Message})
+					a.emit(Event{Type: EventTurnEnd, Step: result.Steps, Message: turn.Message})
 					return fail(fmt.Errorf("agent: finish turn: %w", err), false)
 				}
 			}
 			lastTurn = &turn
-			a.emit(Event{Type: EventTurnEnd, Step: result.Steps, Message: &turn.Message})
+			a.emit(Event{Type: EventTurnEnd, Step: result.Steps, Message: turn.Message})
 			if streamErr != nil {
 				return fail(&ModelError{Message: assistant, Err: streamErr}, false)
 			}
@@ -834,7 +831,7 @@ func (a *Agent) runLoop(
 				a.emit(Event{
 					Type:        EventTurnEnd,
 					Step:        result.Steps,
-					Message:     &turn.Message,
+					Message:     turn.Message,
 					ToolResults: cloneToolResultSlice(turn.ToolResults),
 				})
 				return fail(fmt.Errorf("agent: finish turn: %w", err), false)
@@ -844,7 +841,7 @@ func (a *Agent) runLoop(
 		a.emit(Event{
 			Type:        EventTurnEnd,
 			Step:        result.Steps,
-			Message:     &turn.Message,
+			Message:     turn.Message,
 			ToolResults: cloneToolResultSlice(turn.ToolResults),
 		})
 
@@ -873,6 +870,69 @@ func (a *Agent) runLoop(
 		}
 		return finish()
 	}
+}
+
+// declareToolChanges inserts a system message that turns the transcript's tool
+// declarations into the executable set, merging into a pending system message
+// when one is already present.
+func (a *Agent) declareToolChanges(context AgentContext, pending []ai.Message) []ai.Message {
+	a.mu.Lock()
+	specs := toolSpecsToAI(a.tools.list())
+	declared := a.declaredTools
+	a.mu.Unlock()
+
+	// A transcript without system messages uses the implicit initial tool set;
+	// only actual changes are written back as declarations.
+	if current := ai.GetCurrentTools(context.Messages); len(current) > 0 {
+		declared = current
+	}
+	changes := ai.GetToolStateChanges(declared, specs)
+	if changes.HasToolChanges() {
+		a.mu.Lock()
+		a.declaredTools = specs
+		a.mu.Unlock()
+	}
+
+	systemIndex := -1
+	for i := len(pending) - 1; i >= 0; i-- {
+		if _, ok := pending[i].(*ai.SystemMessage); ok {
+			systemIndex = i
+			break
+		}
+	}
+	if systemIndex >= 0 {
+		if !changes.HasToolChanges() {
+			return pending
+		}
+		system := ai.AsSystem(pending[systemIndex])
+		cloned := *system
+		cloned.ToolsAdded = changes.ToolsAdded
+		cloned.ToolsRemoved = changes.ToolsRemoved
+		updated := make([]ai.Message, len(pending))
+		copy(updated, pending)
+		updated[systemIndex] = &cloned
+		return updated
+	}
+	if !changes.HasToolChanges() {
+		return pending
+	}
+	update := &ai.SystemMessage{
+		ToolsAdded:   changes.ToolsAdded,
+		ToolsRemoved: changes.ToolsRemoved,
+		At:           time.Now().UnixMilli(),
+	}
+	insertIndex := 0
+	for insertIndex < len(pending) {
+		if _, ok := pending[insertIndex].(*ai.SystemMessage); !ok {
+			break
+		}
+		insertIndex++
+	}
+	result := make([]ai.Message, 0, len(pending)+1)
+	result = append(result, pending[:insertIndex]...)
+	result = append(result, update)
+	result = append(result, pending[insertIndex:]...)
+	return result
 }
 
 func (a *Agent) applyRequestUpdate(
@@ -940,8 +1000,7 @@ func (a *Agent) failResult(result Result, err error, synthesize bool) (Result, e
 		step := result.Steps + 1
 		a.emitMessage(message, step)
 		result.NewMessages = append(result.NewMessages, ai.CloneMessage(message))
-		end := ai.CloneMessage(message)
-		a.emit(Event{Type: EventTurnEnd, Step: step, Message: &end})
+		a.emit(Event{Type: EventTurnEnd, Step: step, Message: ai.CloneMessage(message)})
 		result.StopReason = stopReason
 		if result.ErrorMessage == "" {
 			result.ErrorMessage = err.Error()
@@ -994,14 +1053,18 @@ func cloneTurnContext(turn TurnContext) TurnContext {
 func cloneToolResultSlice(messages []ai.Message) []ToolResult {
 	results := make([]ToolResult, 0, len(messages))
 	for _, message := range messages {
-		result := ToolResult{
-			Content:           ai.CloneContentBlocks(message.Content),
-			Details:           ai.CloneRawMessage(message.Details),
-			StructuredContent: ai.CloneRawMessage(message.StructuredContent),
-			IsError:           message.IsError,
+		typed, ok := message.(*ai.ToolResultMessage)
+		if !ok {
+			continue
 		}
-		if message.Usage != nil {
-			usage := *message.Usage
+		result := ToolResult{
+			Content:           ai.CloneContentBlocks(typed.Content),
+			Details:           ai.CloneRawMessage(typed.Details),
+			StructuredContent: ai.CloneRawMessage(typed.StructuredContent),
+			IsError:           typed.IsError,
+		}
+		if typed.Usage != nil {
+			usage := *typed.Usage
 			result.Usage = &usage
 		}
 		results = append(results, result)
@@ -1010,10 +1073,5 @@ func cloneToolResultSlice(messages []ai.Message) []ToolResult {
 }
 
 func systemPromptFromMessages(messages []ai.Message) string {
-	for _, message := range messages {
-		if message.Role == ai.RoleSystem {
-			return message.Text()
-		}
-	}
-	return ""
+	return ai.GetCurrentSystemPrompt(messages)
 }

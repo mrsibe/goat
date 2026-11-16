@@ -17,29 +17,29 @@ func (p *Provider) convertMessages(messages []ai.Message) ([]*genai.Content, str
 	var systemParts []string
 	contents := make([]*genai.Content, 0, len(messages))
 	for _, message := range messages {
-		switch message.Role {
-		case ai.RoleSystem:
-			if text := message.Text(); text != "" {
+		switch typed := message.(type) {
+		case *ai.SystemMessage:
+			if text := ai.RenderSystemMessage(*typed); text != "" {
 				systemParts = append(systemParts, text)
 			}
-		case ai.RoleUser:
-			parts, err := userParts(message)
+		case *ai.UserMessage:
+			parts, err := userParts(typed)
 			if err != nil {
 				return nil, "", err
 			}
 			if len(parts) > 0 {
 				contents = append(contents, &genai.Content{Role: "user", Parts: parts})
 			}
-		case ai.RoleAssistant:
-			parts, err := p.assistantParts(message)
+		case *ai.AssistantMessage:
+			parts, err := p.assistantParts(typed)
 			if err != nil {
 				return nil, "", err
 			}
 			if len(parts) > 0 {
 				contents = append(contents, &genai.Content{Role: "model", Parts: parts})
 			}
-		case ai.RoleTool:
-			part, images, err := toolResultPart(p.info.Model, message)
+		case *ai.ToolResultMessage:
+			part, images, err := toolResultPart(p.info.Model, typed)
 			if err != nil {
 				return nil, "", err
 			}
@@ -55,13 +55,13 @@ func (p *Provider) convertMessages(messages []ai.Message) ([]*genai.Content, str
 				contents = append(contents, &genai.Content{Role: "user", Parts: parts})
 			}
 		default:
-			return nil, "", fmt.Errorf("google: unsupported message role %q", message.Role)
+			return nil, "", fmt.Errorf("google: unsupported message type %T", message)
 		}
 	}
 	return contents, strings.Join(systemParts, "\n\n"), nil
 }
 
-func userParts(message ai.Message) ([]*genai.Part, error) {
+func userParts(message *ai.UserMessage) ([]*genai.Part, error) {
 	parts := make([]*genai.Part, 0, len(message.Content))
 	for _, block := range message.Content {
 		switch block.Type {
@@ -84,7 +84,7 @@ func userParts(message ai.Message) ([]*genai.Part, error) {
 	return parts, nil
 }
 
-func (p *Provider) assistantParts(message ai.Message) ([]*genai.Part, error) {
+func (p *Provider) assistantParts(message *ai.AssistantMessage) ([]*genai.Part, error) {
 	sameProviderModel := message.Provider == p.info.Provider && message.Model == p.info.Model
 	parts := make([]*genai.Part, 0, len(message.Content))
 	for _, block := range message.Content {
@@ -138,7 +138,7 @@ func (p *Provider) assistantParts(message ai.Message) ([]*genai.Part, error) {
 	return parts, nil
 }
 
-func toolResultPart(model string, message ai.Message) (*genai.Part, []*genai.Part, error) {
+func toolResultPart(model string, message *ai.ToolResultMessage) (*genai.Part, []*genai.Part, error) {
 	if strings.TrimSpace(message.ToolName) == "" {
 		return nil, nil, errors.New("google: tool message is missing its tool name")
 	}
@@ -437,7 +437,7 @@ func imagePayload(image *ai.ImageContent) ([]byte, string, string, error) {
 	if (data == "") == (uri == "") {
 		return nil, "", "", errors.New("google: image must set exactly one of data or url")
 	}
-	mediaType := strings.TrimSpace(image.MediaType)
+	mediaType := strings.TrimSpace(image.MimeType)
 	if data != "" {
 		if mediaType == "" {
 			return nil, "", "", errors.New("google: inline image requires a media type")

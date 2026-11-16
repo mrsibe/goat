@@ -80,7 +80,7 @@ func TestAgentConformanceMatrix(t *testing.T) {
 				return faux.New(faux.Turn{Events: []ai.Event{{
 					Type:       ai.EventError,
 					Err:        errors.New("provider failed"),
-					Message:    &partial,
+					Message:    partial,
 					StopReason: ai.StopReasonError,
 				}}})
 			},

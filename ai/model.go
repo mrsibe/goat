@@ -115,8 +115,8 @@ type Event struct {
 	ThinkingDelta string         `json:"thinking_delta,omitempty"`
 	ToolCall      *ToolCall      `json:"tool_call,omitempty"`
 	ToolCallDelta *ToolCallDelta `json:"tool_call_delta,omitempty"`
-	Partial       *Message       `json:"partial,omitempty"`
-	Message       *Message       `json:"message,omitempty"`
+	Partial       Message        `json:"partial,omitempty"`
+	Message       Message        `json:"message,omitempty"`
 	Usage         *Usage         `json:"usage,omitempty"`
 	StopReason    StopReason     `json:"stop_reason,omitempty"`
 	Err           error          `json:"-"`

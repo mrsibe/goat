@@ -64,13 +64,13 @@ func TestBuilderPreservesProviderReplayMetadata(t *testing.T) {
 	builder.ToolStart("tool:fc_1", "call_1", "echo")
 
 	message := builder.Message()
-	if len(message.Content) != 2 {
-		t.Fatalf("content = %+v", message.Content)
+	if len(ai.AsAssistant(message).Content) != 2 {
+		t.Fatalf("content = %+v", ai.AsAssistant(message).Content)
 	}
-	if got := message.Content[0].TextSignature; got != `{"id":"msg_1","phase":"final_answer"}` {
+	if got := ai.AsAssistant(message).Content[0].TextSignature; got != `{"id":"msg_1","phase":"final_answer"}` {
 		t.Fatalf("text signature = %q", got)
 	}
-	if call := message.Content[1].ToolCall; call == nil || call.ID != "call_1" || call.ItemID != "fc_1" {
+	if call := ai.AsAssistant(message).Content[1].ToolCall; call == nil || call.ID != "call_1" || call.ItemID != "fc_1" {
 		t.Fatalf("tool call = %+v", call)
 	}
 }

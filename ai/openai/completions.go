@@ -144,18 +144,18 @@ func convertCompletionsMessage(
 	message ai.Message,
 	format ReasoningFormat,
 ) (openaisdk.ChatCompletionMessageParamUnion, error) {
-	switch message.Role {
-	case ai.RoleSystem:
-		return openaisdk.SystemMessage(message.Text()), nil
-	case ai.RoleUser:
-		return convertCompletionsUserMessage(message)
-	case ai.RoleAssistant:
+	switch typed := message.(type) {
+	case *ai.SystemMessage:
+		return openaisdk.SystemMessage(typed.Text()), nil
+	case *ai.UserMessage:
+		return convertCompletionsUserMessage(typed)
+	case *ai.AssistantMessage:
 		assistant := openaisdk.ChatCompletionAssistantMessageParam{}
-		text := message.Text()
-		if text != "" || len(message.ToolCalls()) == 0 {
+		text := typed.Text()
+		if text != "" || len(typed.ToolCalls()) == 0 {
 			assistant.Content.OfString = param.NewOpt(text)
 		}
-		for _, call := range message.ToolCalls() {
+		for _, call := range typed.ToolCalls() {
 			arguments := string(call.Arguments)
 			if strings.TrimSpace(arguments) == "" {
 				arguments = "{}"
@@ -170,13 +170,13 @@ func convertCompletionsMessage(
 				},
 			})
 		}
-		applyCompletionsReasoningReplay(&assistant, message, format)
+		applyCompletionsReasoningReplay(&assistant, typed, format)
 		return openaisdk.ChatCompletionMessageParamUnion{OfAssistant: &assistant}, nil
-	case ai.RoleTool:
-		if message.ToolCallID == "" {
+	case *ai.ToolResultMessage:
+		if typed.ToolCallID == "" {
 			return openaisdk.ChatCompletionMessageParamUnion{}, errors.New("openai: tool message is missing its tool call id")
 		}
-		for _, block := range message.Content {
+		for _, block := range typed.Content {
 			switch block.Type {
 			case ai.BlockText:
 			case ai.BlockImage:
@@ -190,15 +190,15 @@ func convertCompletionsMessage(
 				)
 			}
 		}
-		return openaisdk.ToolMessage(message.Text(), message.ToolCallID), nil
+		return openaisdk.ToolMessage(typed.Text(), typed.ToolCallID), nil
 	default:
-		return openaisdk.ChatCompletionMessageParamUnion{}, fmt.Errorf("openai: unsupported message role %q", message.Role)
+		return openaisdk.ChatCompletionMessageParamUnion{}, fmt.Errorf("openai: unsupported message type %T", message)
 	}
 }
 
 func applyCompletionsReasoningReplay(
 	assistant *openaisdk.ChatCompletionAssistantMessageParam,
-	message ai.Message,
+	message *ai.AssistantMessage,
 	format ReasoningFormat,
 ) {
 	var thinkingBlocks []ai.ContentBlock
@@ -246,7 +246,7 @@ func isCompletionsReasoningField(field string) bool {
 	return false
 }
 
-func convertCompletionsUserMessage(message ai.Message) (openaisdk.ChatCompletionMessageParamUnion, error) {
+func convertCompletionsUserMessage(message *ai.UserMessage) (openaisdk.ChatCompletionMessageParamUnion, error) {
 	hasImage := false
 	parts := make([]openaisdk.ChatCompletionContentPartUnionParam, 0, len(message.Content))
 	for _, block := range message.Content {
@@ -613,11 +613,11 @@ func parseReasoningDetails(signature string) ([]map[string]any, bool) {
 
 func completionsUsage(raw openaisdk.CompletionUsage) ai.Usage {
 	return ai.Usage{
-		PromptTokens:     raw.PromptTokens,
-		CompletionTokens: raw.CompletionTokens,
-		CacheReadTokens:  raw.PromptTokensDetails.CachedTokens,
-		ReasoningTokens:  raw.CompletionTokensDetails.ReasoningTokens,
-		TotalTokens:      raw.TotalTokens,
+		Input:       raw.PromptTokens,
+		Output:      raw.CompletionTokens,
+		CacheRead:   raw.PromptTokensDetails.CachedTokens,
+		Reasoning:   raw.CompletionTokensDetails.ReasoningTokens,
+		TotalTokens: raw.TotalTokens,
 	}
 }
 

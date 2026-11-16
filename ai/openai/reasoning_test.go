@@ -69,16 +69,16 @@ func TestCompletionsMapsReasoningContent(t *testing.T) {
 		ai.EventTextEnd,
 		ai.EventDone,
 	})
-	if result.Message == nil || len(result.Message.Content) != 2 {
+	if result.Message == nil || len(ai.AsAssistant(result.Message).Content) != 2 {
 		t.Fatalf("message = %+v", result.Message)
 	}
-	thinking := result.Message.Content[0]
+	thinking := ai.AsAssistant(result.Message).Content[0]
 	if thinking.Type != ai.BlockThinking || thinking.Thinking != "plan more" ||
 		thinking.ThinkingSignature != "reasoning_content" {
 		t.Fatalf("thinking block = %+v", thinking)
 	}
-	if result.Message.Content[1].Text != "answer" {
-		t.Fatalf("text block = %+v", result.Message.Content[1])
+	if ai.AsAssistant(result.Message).Content[1].Text != "answer" {
+		t.Fatalf("text block = %+v", ai.AsAssistant(result.Message).Content[1])
 	}
 }
 
@@ -115,10 +115,10 @@ func TestCompletionsReasoningFieldPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Message == nil || len(result.Message.Content) != 1 {
+	if result.Message == nil || len(ai.AsAssistant(result.Message).Content) != 1 {
 		t.Fatalf("message = %+v", result.Message)
 	}
-	thinking := result.Message.Content[0]
+	thinking := ai.AsAssistant(result.Message).Content[0]
 	if thinking.Thinking != "content" || thinking.ThinkingSignature != "reasoning_content" {
 		t.Fatalf("thinking block = %+v", thinking)
 	}
@@ -179,10 +179,10 @@ func TestCompletionsOpenRouterReasoningDetailsReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-requests
-	if result.Message == nil || len(result.Message.Content) != 2 {
+	if result.Message == nil || len(ai.AsAssistant(result.Message).Content) != 2 {
 		t.Fatalf("message = %+v", result.Message)
 	}
-	thinking := result.Message.Content[0]
+	thinking := ai.AsAssistant(result.Message).Content[0]
 	if thinking.Type != ai.BlockThinking || thinking.Thinking != "" {
 		t.Fatalf("thinking block = %+v", thinking)
 	}
@@ -197,7 +197,7 @@ func TestCompletionsOpenRouterReasoningDetailsReplay(t *testing.T) {
 
 	stream, err := provider.Stream(context.Background(), ai.Request{
 		Messages: []ai.Message{
-			*result.Message,
+			result.Message,
 			ai.TextMessage(ai.RoleUser, "continue"),
 		},
 		Options: ai.RequestOptions{ReasoningEffort: "high"},
@@ -255,8 +255,7 @@ func TestCompletionsDeepSeekReasoningRequestAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant := ai.Message{
-		Role: ai.RoleAssistant,
+	assistant := &ai.AssistantMessage{
 		Content: []ai.ContentBlock{
 			{Type: ai.BlockThinking, Thinking: "plan", ThinkingSignature: "reasoning_content"},
 			{Type: ai.BlockText, Text: "done"},
@@ -341,8 +340,7 @@ func TestCompletionsReplaysStandardReasoningField(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream, err := provider.Stream(context.Background(), ai.Request{
-		Messages: []ai.Message{{
-			Role: ai.RoleAssistant,
+		Messages: []ai.Message{&ai.AssistantMessage{
 			Content: []ai.ContentBlock{
 				{Type: ai.BlockThinking, Thinking: "plan", ThinkingSignature: "reasoning_text"},
 				{Type: ai.BlockText, Text: "done"},

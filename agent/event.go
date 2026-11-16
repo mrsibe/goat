@@ -24,16 +24,16 @@ const (
 )
 
 // ThinkingLevel is the requested reasoning level for a model turn.
-type ThinkingLevel string
+type ThinkingLevel = ai.ThinkingLevel
 
 const (
-	ThinkingOff     ThinkingLevel = "off"
-	ThinkingMinimal ThinkingLevel = "minimal"
-	ThinkingLow     ThinkingLevel = "low"
-	ThinkingMedium  ThinkingLevel = "medium"
-	ThinkingHigh    ThinkingLevel = "high"
-	ThinkingXHigh   ThinkingLevel = "xhigh"
-	ThinkingMax     ThinkingLevel = "max"
+	ThinkingOff     = ai.ThinkingOff
+	ThinkingMinimal = ai.ThinkingMinimal
+	ThinkingLow     = ai.ThinkingLow
+	ThinkingMedium  = ai.ThinkingMedium
+	ThinkingHigh    = ai.ThinkingHigh
+	ThinkingXHigh   = ai.ThinkingXHigh
+	ThinkingMax     = ai.ThinkingMax
 )
 
 // EventType identifies a lifecycle or streaming event.
@@ -63,7 +63,7 @@ type Event struct {
 	Step                  int          `json:"step,omitempty"`
 	Text                  string       `json:"text,omitempty"`
 	Thinking              string       `json:"thinking,omitempty"`
-	Message               *ai.Message  `json:"message,omitempty"`
+	Message               ai.Message   `json:"message,omitempty"`
 	AssistantMessageEvent *ai.Event    `json:"assistant_message_event,omitempty"`
 	ToolCall              *ai.ToolCall `json:"tool_call,omitempty"`
 	ToolResult            *ToolResult  `json:"tool_result,omitempty"`
@@ -94,7 +94,7 @@ type State struct {
 	Tools            []Tool
 	Messages         []ai.Message
 	IsStreaming      bool
-	StreamingMessage *ai.Message
+	StreamingMessage ai.Message
 	PendingToolCalls []string
 	ErrorMessage     string
 }

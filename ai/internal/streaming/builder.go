@@ -38,7 +38,7 @@ type toolBlock struct {
 // event ordering.
 type Builder struct {
 	info       ai.ModelInfo
-	message    ai.Message
+	message    *ai.AssistantMessage
 	texts      map[string]*textBlock
 	thinkings  map[string]*thinkingBlock
 	tools      map[string]*toolBlock
@@ -50,7 +50,7 @@ type Builder struct {
 func New(info ai.ModelInfo) *Builder {
 	return &Builder{
 		info:      info,
-		message:   ai.Message{Role: ai.RoleAssistant},
+		message:   &ai.AssistantMessage{},
 		texts:     make(map[string]*textBlock),
 		thinkings: make(map[string]*thinkingBlock),
 		tools:     make(map[string]*toolBlock),
@@ -290,7 +290,7 @@ func (b *Builder) Done(stopReason ai.StopReason) ai.Event {
 	usage := b.usage
 	return ai.Event{
 		Type:       ai.EventDone,
-		Message:    &message,
+		Message:    message,
 		Usage:      &usage,
 		StopReason: stopReason,
 	}
@@ -304,8 +304,8 @@ func (b *Builder) Fail(err error, stopReason ai.StopReason) ai.Event {
 	}
 	return ai.Event{
 		Type:       ai.EventError,
-		Message:    &message,
-		Partial:    &message,
+		Message:    message,
+		Partial:    message,
 		Usage:      b.usagePtr(),
 		StopReason: stopReason,
 		Err:        err,
@@ -394,12 +394,11 @@ func (b *Builder) toolCall(block *toolBlock) ai.ToolCall {
 	return ai.CloneToolCall(*b.message.Content[block.index].ToolCall)
 }
 
-func (b *Builder) partial() *ai.Message {
+func (b *Builder) partial() ai.Message {
 	if !b.started {
 		return nil
 	}
-	message := b.Message()
-	return &message
+	return b.Message()
 }
 
 func (b *Builder) usagePtr() *ai.Usage {

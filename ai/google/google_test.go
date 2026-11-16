@@ -70,8 +70,7 @@ func TestProviderMapsGeminiRequestsAndStreaming(t *testing.T) {
 		Messages: []ai.Message{
 			ai.TextMessage(ai.RoleSystem, "sys"),
 			ai.TextMessage(ai.RoleUser, "hi"),
-			{
-				Role:     ai.RoleAssistant,
+			&ai.AssistantMessage{
 				Provider: "google",
 				Model:    "gemini-3-flash",
 				Content: []ai.ContentBlock{
@@ -80,13 +79,12 @@ func TestProviderMapsGeminiRequestsAndStreaming(t *testing.T) {
 					{Type: ai.BlockToolCall, ToolCall: &call},
 				},
 			},
-			{
-				Role:       ai.RoleTool,
+			&ai.ToolResultMessage{
 				ToolCallID: "call_1",
 				ToolName:   "get_weather",
 				Content: []ai.ContentBlock{
 					{Type: ai.BlockText, Text: "sunny"},
-					{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MediaType: "image/png"}},
+					{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MimeType: "image/png"}},
 				},
 			},
 		},
@@ -136,8 +134,8 @@ func TestProviderMapsGeminiRequestsAndStreaming(t *testing.T) {
 	if result.StopReason != ai.StopReasonToolCalls {
 		t.Fatalf("stop reason = %q", result.StopReason)
 	}
-	if result.Usage.PromptTokens != 9 || result.Usage.CompletionTokens != 5 ||
-		result.Usage.CacheReadTokens != 1 || result.Usage.ReasoningTokens != 2 ||
+	if result.Usage.Input != 9 || result.Usage.Output != 5 ||
+		result.Usage.CacheRead != 1 || result.Usage.Reasoning != 2 ||
 		result.Usage.TotalTokens != 15 {
 		t.Fatalf("usage = %+v", result.Usage)
 	}
@@ -148,7 +146,7 @@ func TestProviderMapsGeminiRequestsAndStreaming(t *testing.T) {
 	if text != "hello" {
 		t.Fatalf("message text = %q", text)
 	}
-	blocks := result.Message.Content
+	blocks := ai.AsAssistant(result.Message).Content
 	if blocks[0].Thinking != "thinking" || blocks[0].ThinkingSignature != "c2ln" {
 		t.Fatalf("thinking block = %+v", blocks[0])
 	}
@@ -442,11 +440,11 @@ func TestSignedFunctionCallDoesNotCreateEmptyTextBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Message.Content) != 1 || result.Message.Content[0].Type != ai.BlockToolCall {
-		t.Fatalf("content = %+v", result.Message.Content)
+	if len(ai.AsAssistant(result.Message).Content) != 1 || ai.AsAssistant(result.Message).Content[0].Type != ai.BlockToolCall {
+		t.Fatalf("content = %+v", ai.AsAssistant(result.Message).Content)
 	}
-	if result.Message.Content[0].ToolCall.ThoughtSignature != "c2ln" {
-		t.Fatalf("tool call = %+v", result.Message.Content[0].ToolCall)
+	if ai.AsAssistant(result.Message).Content[0].ToolCall.ThoughtSignature != "c2ln" {
+		t.Fatalf("tool call = %+v", ai.AsAssistant(result.Message).Content[0].ToolCall)
 	}
 }
 

@@ -138,8 +138,7 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := ai.ToolCall{ID: "call_1", Name: "get_weather", Arguments: json.RawMessage(`{"city":"北京"}`)}
-	assistant := ai.Message{
-		Role: ai.RoleAssistant,
+	assistant := &ai.AssistantMessage{
 		Content: []ai.ContentBlock{
 			{Type: ai.BlockText, Text: "checking"},
 			{Type: ai.BlockToolCall, ToolCall: &call},
@@ -242,7 +241,7 @@ func TestProviderValidationAndConversionErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := provider.Stream(context.Background(), ai.Request{
-		Messages: []ai.Message{{Role: "invalid"}},
+		Messages: []ai.Message{nil},
 	}); err == nil {
 		t.Fatal("expected an unsupported role error")
 	}
@@ -299,11 +298,10 @@ func TestCompletionsMapsUserImages(t *testing.T) {
 		t.Fatal(err)
 	}
 	stream, err := provider.Stream(context.Background(), ai.Request{
-		Messages: []ai.Message{{
-			Role: ai.RoleUser,
+		Messages: []ai.Message{&ai.UserMessage{
 			Content: []ai.ContentBlock{
 				{Type: ai.BlockText, Text: "look"},
-				{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MediaType: "image/png"}},
+				{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MimeType: "image/png"}},
 			},
 		}},
 	})
@@ -340,12 +338,12 @@ func TestCompletionsRejectsImageToolResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = provider.Stream(context.Background(), ai.Request{
-		Messages: []ai.Message{ai.ToolResultMessage(
+		Messages: []ai.Message{ai.NewToolResultMessage(
 			"call_1",
 			"screenshot",
 			[]ai.ContentBlock{{
 				Type:  ai.BlockImage,
-				Image: &ai.ImageContent{Data: "aGVsbG8=", MediaType: "image/png"},
+				Image: &ai.ImageContent{Data: "aGVsbG8=", MimeType: "image/png"},
 			}},
 			false,
 		)},

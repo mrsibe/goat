@@ -197,7 +197,7 @@ func imageURL(image *ai.ImageContent) (string, error) {
 	if url != "" {
 		return url, nil
 	}
-	mediaType := strings.TrimSpace(image.MediaType)
+	mediaType := strings.TrimSpace(image.MimeType)
 	if mediaType == "" {
 		return "", errors.New("openai: inline image requires a media type")
 	}

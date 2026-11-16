@@ -49,8 +49,7 @@ func TestProviderUsesDefaultsAndDeepSeekReasoning(t *testing.T) {
 		!info.SupportsThinking || info.SupportsImages {
 		t.Fatalf("info = %+v", info)
 	}
-	assistant := ai.Message{
-		Role: ai.RoleAssistant,
+	assistant := &ai.AssistantMessage{
 		Content: []ai.ContentBlock{
 			{Type: ai.BlockThinking, Thinking: "plan", ThinkingSignature: "reasoning_content"},
 			{Type: ai.BlockText, Text: "done"},

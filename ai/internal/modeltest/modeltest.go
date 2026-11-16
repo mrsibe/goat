@@ -14,7 +14,7 @@ import (
 // StreamResult is the normalized output of one adapter stream.
 type StreamResult struct {
 	Events     []ai.Event
-	Message    *ai.Message
+	Message    ai.Message
 	Usage      ai.Usage
 	StopReason ai.StopReason
 }
@@ -49,8 +49,7 @@ func Collect(ctx context.Context, model ai.Model, request ai.Request) (StreamRes
 		case ai.EventDone, ai.EventError:
 			result.StopReason = event.StopReason
 			if event.Message != nil {
-				message := ai.CloneMessage(*event.Message)
-				result.Message = &message
+				result.Message = ai.CloneMessage(event.Message)
 			}
 		}
 	}

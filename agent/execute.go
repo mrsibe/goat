@@ -384,8 +384,7 @@ func (a *Agent) toolExecutionMode() ToolExecutionMode {
 }
 
 func toolResultMessage(call ai.ToolCall, result ToolResult, durationMs int64) ai.Message {
-	return ai.Message{
-		Role:              ai.RoleTool,
+	return &ai.ToolResultMessage{
 		Content:           ai.CloneContentBlocks(result.Content),
 		ToolCallID:        call.ID,
 		ToolName:          call.Name,
@@ -394,7 +393,7 @@ func toolResultMessage(call ai.ToolCall, result ToolResult, durationMs int64) ai
 		StructuredContent: ai.CloneRawMessage(result.StructuredContent),
 		Usage:             cloneUsage(result.Usage),
 		DurationMs:        durationMs,
-		Timestamp:         time.Now().UnixMilli(),
+		At:                time.Now().UnixMilli(),
 	}
 }
 

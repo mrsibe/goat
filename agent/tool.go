@@ -222,6 +222,17 @@ func cloneToolSpec(spec ToolSpec) ToolSpec {
 	return spec
 }
 
+func toolSpecsToAI(specs []ToolSpec) []ai.ToolSpec {
+	if len(specs) == 0 {
+		return nil
+	}
+	result := make([]ai.ToolSpec, len(specs))
+	for i, spec := range specs {
+		result[i] = spec.aiToolSpec()
+	}
+	return result
+}
+
 func (spec ToolSpec) aiToolSpec() ai.ToolSpec {
 	return ai.ToolSpec{
 		Name:        spec.Name,
@@ -256,7 +267,7 @@ func validateToolResult(result ToolResult) error {
 			if hasData == hasURL {
 				return fmt.Errorf("content block %d image must set exactly one of data or url", index)
 			}
-			if hasData && strings.TrimSpace(block.Image.MediaType) == "" {
+			if hasData && strings.TrimSpace(block.Image.MimeType) == "" {
 				return fmt.Errorf("content block %d image data requires a media type", index)
 			}
 		default:

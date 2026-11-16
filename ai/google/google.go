@@ -382,11 +382,11 @@ func usageFromMetadata(metadata genai.GenerateContentResponseUsageMetadata) ai.U
 		prompt = 0
 	}
 	return ai.Usage{
-		PromptTokens:     prompt,
-		CompletionTokens: int64(metadata.CandidatesTokenCount + metadata.ThoughtsTokenCount),
-		CacheReadTokens:  int64(metadata.CachedContentTokenCount),
-		ReasoningTokens:  int64(metadata.ThoughtsTokenCount),
-		TotalTokens:      int64(metadata.TotalTokenCount),
+		Input:       prompt,
+		Output:      int64(metadata.CandidatesTokenCount + metadata.ThoughtsTokenCount),
+		CacheRead:   int64(metadata.CachedContentTokenCount),
+		Reasoning:   int64(metadata.ThoughtsTokenCount),
+		TotalTokens: int64(metadata.TotalTokenCount),
 	}
 }
 

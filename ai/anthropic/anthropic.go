@@ -180,15 +180,15 @@ func convertMessages(messages []ai.Message) ([]anthropicsdk.TextBlockParam, []an
 	lastWasToolResult := false
 
 	for _, message := range messages {
-		switch message.Role {
-		case ai.RoleSystem:
-			text := message.Text()
+		switch typed := message.(type) {
+		case *ai.SystemMessage:
+			text := typed.Text()
 			if text != "" {
 				system = append(system, anthropicsdk.TextBlockParam{Text: text})
 			}
 			lastWasToolResult = false
-		case ai.RoleUser:
-			blocks, err := userBlocks(message)
+		case *ai.UserMessage:
+			blocks, err := userBlocks(typed)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -197,9 +197,9 @@ func convertMessages(messages []ai.Message) ([]anthropicsdk.TextBlockParam, []an
 			}
 			converted = append(converted, anthropicsdk.NewUserMessage(blocks...))
 			lastWasToolResult = false
-		case ai.RoleAssistant:
-			blocks := make([]anthropicsdk.ContentBlockParamUnion, 0, len(message.Content))
-			for _, block := range message.Content {
+		case *ai.AssistantMessage:
+			blocks := make([]anthropicsdk.ContentBlockParamUnion, 0, len(typed.Content))
+			for _, block := range typed.Content {
 				switch block.Type {
 				case ai.BlockText:
 					blocks = append(blocks, anthropicsdk.NewTextBlock(block.Text))
@@ -233,11 +233,11 @@ func convertMessages(messages []ai.Message) ([]anthropicsdk.TextBlockParam, []an
 			}
 			converted = append(converted, anthropicsdk.NewAssistantMessage(blocks...))
 			lastWasToolResult = false
-		case ai.RoleTool:
-			if message.ToolCallID == "" {
+		case *ai.ToolResultMessage:
+			if typed.ToolCallID == "" {
 				return nil, nil, errors.New("anthropic: tool message is missing its tool call id")
 			}
-			block, err := toolResultBlock(message)
+			block, err := toolResultBlock(typed)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -249,13 +249,13 @@ func convertMessages(messages []ai.Message) ([]anthropicsdk.TextBlockParam, []an
 				lastWasToolResult = true
 			}
 		default:
-			return nil, nil, fmt.Errorf("anthropic: unsupported message role %q", message.Role)
+			return nil, nil, fmt.Errorf("anthropic: unsupported message type %T", message)
 		}
 	}
 	return system, converted, nil
 }
 
-func userBlocks(message ai.Message) ([]anthropicsdk.ContentBlockParamUnion, error) {
+func userBlocks(message *ai.UserMessage) ([]anthropicsdk.ContentBlockParamUnion, error) {
 	blocks := make([]anthropicsdk.ContentBlockParamUnion, 0, len(message.Content))
 	for _, block := range message.Content {
 		switch block.Type {
@@ -276,7 +276,7 @@ func userBlocks(message ai.Message) ([]anthropicsdk.ContentBlockParamUnion, erro
 	return blocks, nil
 }
 
-func toolResultBlock(message ai.Message) (anthropicsdk.ContentBlockParamUnion, error) {
+func toolResultBlock(message *ai.ToolResultMessage) (anthropicsdk.ContentBlockParamUnion, error) {
 	result := anthropicsdk.ToolResultBlockParam{
 		ToolUseID: message.ToolCallID,
 		IsError:   param.NewOpt(message.IsError),
@@ -322,12 +322,12 @@ func imageBlock(image *ai.ImageContent) (anthropicsdk.ContentBlockParamUnion, er
 		)
 	}
 	if data != "" {
-		if strings.TrimSpace(image.MediaType) == "" {
+		if strings.TrimSpace(image.MimeType) == "" {
 			return anthropicsdk.ContentBlockParamUnion{}, errors.New(
 				"anthropic: inline image requires a media type",
 			)
 		}
-		return anthropicsdk.NewImageBlockBase64(image.MediaType, data), nil
+		return anthropicsdk.NewImageBlockBase64(image.MimeType, data), nil
 	}
 	return anthropicsdk.NewImageBlock(anthropicsdk.URLImageSourceParam{URL: url}), nil
 }
@@ -770,12 +770,12 @@ func (u *usageTotals) applyDelta(usage anthropicsdk.MessageDeltaUsage) {
 func (u usageTotals) normalized() ai.Usage {
 	prompt := u.input + u.cacheRead + u.cacheWrite
 	return ai.Usage{
-		PromptTokens:     prompt,
-		CompletionTokens: u.output,
-		CacheReadTokens:  u.cacheRead,
-		CacheWriteTokens: u.cacheWrite,
-		ReasoningTokens:  u.reasoning,
-		TotalTokens:      prompt + u.output,
+		Input:       prompt,
+		Output:      u.output,
+		CacheRead:   u.cacheRead,
+		CacheWrite:  u.cacheWrite,
+		Reasoning:   u.reasoning,
+		TotalTokens: prompt + u.output,
 	}
 }
 

@@ -19,7 +19,8 @@ func (a *Agent) runModelTurn(
 	messages []ai.Message,
 	tools []ai.ToolSpec,
 	options ai.RequestOptions,
-) (ai.Message, ai.StopReason, ai.Usage, error) {
+	thinking ai.ThinkingLevel,
+) (*ai.AssistantMessage, ai.StopReason, ai.Usage, error) {
 	info := model.Info()
 	started := time.Now()
 	stream, err := model.Stream(ctx, ai.Request{
@@ -40,28 +41,25 @@ func (a *Agent) runModelTurn(
 	}
 	defer stream.Close()
 
-	start := ai.Message{
-		Role:      ai.RoleAssistant,
-		Provider:  info.Provider,
-		Model:     info.Model,
-		API:       info.API,
-		Timestamp: started.UnixMilli(),
+	start := &ai.AssistantMessage{
+		Provider: info.Provider,
+		Model:    info.Model,
+		API:      info.API,
+		At:       started.UnixMilli(),
 	}
-	startCopy := ai.CloneMessage(start)
-	a.emit(Event{Type: EventMessageStart, Step: step, Message: &startCopy})
+	a.emit(Event{Type: EventMessageStart, Step: step, Message: ai.CloneMessage(start)})
 
 	accumulator := newAssistantAccumulator()
 	var usage ai.Usage
 	var stopReason ai.StopReason
-	var finalMessage *ai.Message
+	var finalMessage *ai.AssistantMessage
 	sawUsage := false
 	sawDone := false
 
 	for {
 		if err := ctx.Err(); err != nil {
-			assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonAborted, usage)
-			end := ai.CloneMessage(assistant)
-			a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+			assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonAborted, usage, thinking)
+			a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(assistant)})
 			return assistant, ai.StopReasonAborted, usage, err
 		}
 		event, nextErr := stream.Next()
@@ -69,10 +67,9 @@ func (a *Agent) runModelTurn(
 			break
 		}
 		if nextErr != nil {
-			assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage)
+			assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage, thinking)
 			assistant.ErrorMessage = nextErr.Error()
-			end := ai.CloneMessage(assistant)
-			a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+			a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(assistant)})
 			return assistant, ai.StopReasonError, usage, nextErr
 		}
 
@@ -109,10 +106,9 @@ func (a *Agent) runModelTurn(
 		case ai.EventToolCallStart:
 			if event.ToolCall == nil {
 				err := errors.New("agent: tool call start is missing its payload")
-				assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage)
+				assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage, thinking)
 				assistant.ErrorMessage = err.Error()
-				end := ai.CloneMessage(assistant)
-				a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+				a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(assistant)})
 				return assistant, ai.StopReasonError, usage, err
 			}
 			accumulator.startToolCall(event.ContentIndex, *event.ToolCall)
@@ -120,27 +116,24 @@ func (a *Agent) runModelTurn(
 		case ai.EventToolCallDelta:
 			if event.ToolCallDelta == nil {
 				err := errors.New("agent: tool call delta is missing its payload")
-				assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage)
+				assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage, thinking)
 				assistant.ErrorMessage = err.Error()
-				end := ai.CloneMessage(assistant)
-				a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+				a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(assistant)})
 				return assistant, ai.StopReasonError, usage, err
 			}
 			if err := accumulator.addToolCall(event.ContentIndex, *event.ToolCallDelta); err != nil {
-				assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage)
+				assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage, thinking)
 				assistant.ErrorMessage = err.Error()
-				end := ai.CloneMessage(assistant)
-				a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+				a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(assistant)})
 				return assistant, ai.StopReasonError, usage, err
 			}
 			a.emitStreamUpdate(step, info, started, event, accumulator, "", "")
 		case ai.EventToolCallEnd:
 			if event.ToolCall == nil {
 				err := errors.New("agent: tool call end is missing its payload")
-				assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage)
+				assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage, thinking)
 				assistant.ErrorMessage = err.Error()
-				end := ai.CloneMessage(assistant)
-				a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+				a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(assistant)})
 				return assistant, ai.StopReasonError, usage, err
 			}
 			accumulator.finishToolCall(event.ContentIndex, *event.ToolCall)
@@ -154,11 +147,9 @@ func (a *Agent) runModelTurn(
 			sawDone = true
 			stopReason = event.StopReason
 			if event.Message != nil {
-				message := ai.CloneMessage(*event.Message)
-				finalMessage = &message
+				finalMessage = asAssistantMessage(event.Message)
 			} else if event.Partial != nil {
-				message := ai.CloneMessage(*event.Partial)
-				finalMessage = &message
+				finalMessage = asAssistantMessage(event.Partial)
 			}
 			if !sawUsage && event.Usage != nil {
 				usage = *event.Usage
@@ -168,11 +159,9 @@ func (a *Agent) runModelTurn(
 				event.StopReason = ai.StopReasonError
 			}
 			if event.Message != nil {
-				message := ai.CloneMessage(*event.Message)
-				finalMessage = &message
+				finalMessage = asAssistantMessage(event.Message)
 			} else if event.Partial != nil {
-				message := ai.CloneMessage(*event.Partial)
-				finalMessage = &message
+				finalMessage = asAssistantMessage(event.Partial)
 			}
 			if !sawUsage && event.Usage != nil {
 				usage = *event.Usage
@@ -185,19 +174,17 @@ func (a *Agent) runModelTurn(
 			} else {
 				streamErr = errors.New("agent: model stream reported an error")
 			}
-			assistant := finalizeAssistant(accumulator, finalMessage, info, started, event.StopReason, usage)
+			assistant := finalizeAssistant(accumulator, finalMessage, info, started, event.StopReason, usage, thinking)
 			if assistant.ErrorMessage == "" {
 				assistant.ErrorMessage = streamErr.Error()
 			}
-			end := ai.CloneMessage(assistant)
-			a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+			a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(assistant)})
 			return assistant, event.StopReason, usage, streamErr
 		default:
 			err := fmt.Errorf("agent: unknown model event type %q", event.Type)
-			assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage)
+			assistant := finalizeAssistant(accumulator, finalMessage, info, started, ai.StopReasonError, usage, thinking)
 			assistant.ErrorMessage = err.Error()
-			end := ai.CloneMessage(assistant)
-			a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+			a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(assistant)})
 			return assistant, ai.StopReasonError, usage, err
 		}
 	}
@@ -205,56 +192,79 @@ func (a *Agent) runModelTurn(
 	if !sawDone {
 		stopReason = ai.StopReasonStop
 		if accumulator.hasToolCalls() {
-			stopReason = ai.StopReasonToolCalls
+			stopReason = ai.StopReasonToolUse
 		}
 	}
-	assistant := finalizeAssistant(accumulator, finalMessage, info, started, stopReason, usage)
-	end := ai.CloneMessage(assistant)
-	a.emit(Event{Type: EventMessageEnd, Step: step, Message: &end})
+	assistant := finalizeAssistant(accumulator, finalMessage, info, started, stopReason, usage, thinking)
+	a.emit(Event{Type: EventMessageEnd, Step: step, Message: ai.CloneMessage(assistant)})
 	return assistant, stopReason, usage, nil
 }
 
-func failedAssistantMessage(info ai.ModelInfo, started time.Time, stopReason ai.StopReason, err error) ai.Message {
-	return ai.Message{
-		Role:         ai.RoleAssistant,
+func failedAssistantMessage(info ai.ModelInfo, started time.Time, stopReason ai.StopReason, err error) *ai.AssistantMessage {
+	return &ai.AssistantMessage{
 		Content:      []ai.ContentBlock{{Type: ai.BlockText, Text: ""}},
 		Provider:     info.Provider,
 		Model:        info.Model,
 		API:          info.API,
-		Timestamp:    started.UnixMilli(),
+		At:           started.UnixMilli(),
 		DurationMs:   time.Since(started).Milliseconds(),
 		StopReason:   stopReason,
 		ErrorMessage: err.Error(),
 	}
 }
 
+// asAssistantMessage projects any message onto an assistant message.
+func asAssistantMessage(message ai.Message) *ai.AssistantMessage {
+	if assistant, ok := message.(*ai.AssistantMessage); ok {
+		cloned := *assistant
+		cloned.Content = ai.CloneContentBlocks(assistant.Content)
+		return &cloned
+	}
+	return &ai.AssistantMessage{Content: ai.CloneContentBlocks(contentOf(message))}
+}
+
+func contentOf(message ai.Message) []ai.ContentBlock {
+	switch typed := message.(type) {
+	case *ai.SystemMessage:
+		if typed.Content == "" {
+			return nil
+		}
+		return []ai.ContentBlock{{Type: ai.BlockText, Text: typed.Content}}
+	case *ai.UserMessage:
+		return typed.Content
+	case *ai.AssistantMessage:
+		return typed.Content
+	case *ai.ToolResultMessage:
+		return typed.Content
+	default:
+		return nil
+	}
+}
+
 func finalizeAssistant(
 	accumulator *assistantAccumulator,
-	finalMessage *ai.Message,
+	finalMessage *ai.AssistantMessage,
 	info ai.ModelInfo,
 	started time.Time,
 	stopReason ai.StopReason,
 	usage ai.Usage,
-) ai.Message {
-	var message ai.Message
+	thinking ai.ThinkingLevel,
+) *ai.AssistantMessage {
+	var message *ai.AssistantMessage
 	if finalMessage != nil {
-		message = ai.CloneMessage(*finalMessage)
+		message = asAssistantMessage(finalMessage)
 	} else {
 		built, err := accumulator.message()
 		message = built
 		if err != nil {
-			message = ai.Message{
-				Role:         ai.RoleAssistant,
+			message = &ai.AssistantMessage{
 				StopReason:   ai.StopReasonError,
 				ErrorMessage: err.Error(),
 			}
 		}
 	}
-	if message.Role == "" {
-		message.Role = ai.RoleAssistant
-	}
-	if message.Timestamp == 0 {
-		message.Timestamp = started.UnixMilli()
+	if message.At == 0 {
+		message.At = started.UnixMilli()
 	}
 	if message.DurationMs == 0 {
 		message.DurationMs = time.Since(started).Milliseconds()
@@ -271,23 +281,25 @@ func finalizeAssistant(
 	if message.StopReason == "" {
 		message.StopReason = stopReason
 	}
-	if message.Usage == nil {
-		message.Usage = &usage
+	if message.Usage == (ai.Usage{}) {
+		message.Usage = usage
+	}
+	if message.ThinkingLevel == "" {
+		message.ThinkingLevel = thinking
 	}
 	return message
 }
 
-func cloneMessagePointer(message *ai.Message) *ai.Message {
+func cloneMessageValue(message ai.Message) ai.Message {
 	if message == nil {
 		return nil
 	}
-	cloned := ai.CloneMessage(*message)
-	return &cloned
+	return ai.CloneMessage(message)
 }
 
 func cloneModelEvent(event ai.Event) ai.Event {
-	event.Partial = cloneMessagePointer(event.Partial)
-	event.Message = cloneMessagePointer(event.Message)
+	event.Partial = cloneMessageValue(event.Partial)
+	event.Message = cloneMessageValue(event.Message)
 	if event.ToolCall != nil {
 		call := ai.CloneToolCall(*event.ToolCall)
 		event.ToolCall = &call
@@ -312,19 +324,18 @@ func (a *Agent) emitStreamUpdate(
 	text string,
 	thinking string,
 ) {
-	partial := cloneMessagePointer(modelEvent.Partial)
-	if partial == nil {
-		message := accumulator.partialMessage(info, started)
-		partial = &message
+	partial := asAssistantMessage(modelEvent.Partial)
+	if modelEvent.Partial == nil {
+		partial = accumulator.partialMessage(info, started)
 	}
 	providerEvent := cloneModelEvent(modelEvent)
-	providerEvent.Partial = cloneMessagePointer(partial)
+	providerEvent.Partial = ai.CloneMessage(partial)
 	a.emit(Event{
 		Type:                  EventMessageUpdate,
 		Step:                  step,
 		Text:                  text,
 		Thinking:              thinking,
-		Message:               cloneMessagePointer(partial),
+		Message:               ai.CloneMessage(partial),
 		AssistantMessageEvent: &providerEvent,
 	})
 
@@ -335,14 +346,14 @@ func (a *Agent) emitStreamUpdate(
 				Type:    EventMessageDelta,
 				Step:    step,
 				Text:    text,
-				Message: cloneMessagePointer(partial),
+				Message: ai.CloneMessage(partial),
 			})
 		}
 	case ai.EventThinkingStart:
 		a.emit(Event{
 			Type:    EventThinkingStart,
 			Step:    step,
-			Message: cloneMessagePointer(partial),
+			Message: ai.CloneMessage(partial),
 		})
 	case ai.EventThinkingDelta:
 		if thinking != "" {
@@ -350,7 +361,7 @@ func (a *Agent) emitStreamUpdate(
 				Type:     EventThinkingDelta,
 				Step:     step,
 				Thinking: thinking,
-				Message:  cloneMessagePointer(partial),
+				Message:  ai.CloneMessage(partial),
 			})
 		}
 	case ai.EventThinkingEnd:
@@ -358,7 +369,7 @@ func (a *Agent) emitStreamUpdate(
 			Type:     EventThinkingEnd,
 			Step:     step,
 			Thinking: thinking,
-			Message:  cloneMessagePointer(partial),
+			Message:  ai.CloneMessage(partial),
 		})
 	}
 }
@@ -480,13 +491,12 @@ func (a *assistantAccumulator) hasToolCalls() bool {
 	return false
 }
 
-func (a *assistantAccumulator) partialMessage(info ai.ModelInfo, started time.Time) ai.Message {
-	message := ai.Message{
-		Role:      ai.RoleAssistant,
-		Provider:  info.Provider,
-		Model:     info.Model,
-		API:       info.API,
-		Timestamp: started.UnixMilli(),
+func (a *assistantAccumulator) partialMessage(info ai.ModelInfo, started time.Time) *ai.AssistantMessage {
+	message := &ai.AssistantMessage{
+		Provider: info.Provider,
+		Model:    info.Model,
+		API:      info.API,
+		At:       started.UnixMilli(),
 	}
 	for _, key := range a.order {
 		block := a.blocks[key]
@@ -563,8 +573,8 @@ func (a *toolCallAccumulator) partial(index int) ai.ToolCall {
 	}
 }
 
-func (a *assistantAccumulator) message() (ai.Message, error) {
-	message := ai.Message{Role: ai.RoleAssistant}
+func (a *assistantAccumulator) message() (*ai.AssistantMessage, error) {
+	message := &ai.AssistantMessage{}
 	seenIDs := make(map[string]struct{})
 	for _, key := range a.order {
 		block := a.blocks[key]
@@ -624,13 +634,13 @@ func (a *assistantAccumulator) message() (ai.Message, error) {
 			}
 		}
 		if name == "" {
-			return ai.Message{}, fmt.Errorf("agent: tool call %d is missing a name", key.index)
+			return nil, fmt.Errorf("agent: tool call %d is missing a name", key.index)
 		}
 		if id == "" {
 			id = fmt.Sprintf("call_%d", key.index)
 		}
 		if _, exists := seenIDs[id]; exists {
-			return ai.Message{}, fmt.Errorf("agent: duplicate tool call id %q", id)
+			return nil, fmt.Errorf("agent: duplicate tool call id %q", id)
 		}
 		seenIDs[id] = struct{}{}
 		if strings.TrimSpace(arguments) == "" {

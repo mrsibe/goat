@@ -133,8 +133,7 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 	}
 
 	call := ai.ToolCall{ID: "toolu_1", Name: "get_weather", Arguments: json.RawMessage(`{"city":"北京"}`)}
-	assistant := ai.Message{
-		Role: ai.RoleAssistant,
+	assistant := &ai.AssistantMessage{
 		Content: []ai.ContentBlock{
 			{Type: ai.BlockText, Text: "checking"},
 			{Type: ai.BlockToolCall, ToolCall: &call},
@@ -190,9 +189,9 @@ func TestProviderMapsHistoryToolsAndStreaming(t *testing.T) {
 		t.Fatalf("tool delta = %+v", events[5])
 	}
 	usage := events[8].Usage
-	if usage == nil || usage.PromptTokens != 15 || usage.CompletionTokens != 5 ||
-		usage.CacheReadTokens != 2 || usage.CacheWriteTokens != 3 ||
-		usage.ReasoningTokens != 2 || usage.TotalTokens != 20 {
+	if usage == nil || usage.Input != 15 || usage.Output != 5 ||
+		usage.CacheRead != 2 || usage.CacheWrite != 3 ||
+		usage.Reasoning != 2 || usage.TotalTokens != 20 {
 		t.Fatalf("usage = %+v", usage)
 	}
 	if events[9].StopReason != ai.StopReasonToolCalls || events[9].Message == nil {
@@ -266,7 +265,7 @@ func TestProviderValidationAndDefaultMaxTokens(t *testing.T) {
 		t.Fatalf("info = %+v", info)
 	}
 	if _, err := provider.Stream(context.Background(), ai.Request{
-		Messages: []ai.Message{{Role: "invalid"}},
+		Messages: []ai.Message{nil},
 	}); err == nil {
 		t.Fatal("expected an unsupported role error")
 	}
@@ -312,27 +311,25 @@ func TestProviderMapsThinkingAndImages(t *testing.T) {
 	call := ai.ToolCall{ID: "toolu_1", Name: "screenshot", Arguments: json.RawMessage(`{}`)}
 	stream, err := provider.Stream(context.Background(), ai.Request{
 		Messages: []ai.Message{
-			{
-				Role: ai.RoleUser,
+			&ai.UserMessage{
 				Content: []ai.ContentBlock{
 					{Type: ai.BlockText, Text: "look"},
-					{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MediaType: "image/png"}},
+					{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MimeType: "image/png"}},
 				},
 			},
-			{
-				Role: ai.RoleAssistant,
+			&ai.AssistantMessage{
 				Content: []ai.ContentBlock{
 					{Type: ai.BlockThinking, Thinking: "plan", ThinkingSignature: "sig"},
 					{Type: ai.BlockText, Text: "taking a screenshot"},
 					{Type: ai.BlockToolCall, ToolCall: &call},
 				},
 			},
-			ai.ToolResultMessage(
+			ai.NewToolResultMessage(
 				"toolu_1",
 				"screenshot",
 				[]ai.ContentBlock{{
 					Type:  ai.BlockImage,
-					Image: &ai.ImageContent{Data: "d29ybGQ=", MediaType: "image/jpeg"},
+					Image: &ai.ImageContent{Data: "d29ybGQ=", MimeType: "image/jpeg"},
 				}},
 				false,
 			),
