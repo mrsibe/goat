@@ -38,6 +38,9 @@ type Config struct {
 	MaxRetries      *int
 	ContextWindow   int
 	MaxOutputTokens int
+	Reasoning       bool
+	ThinkingLevels  []ai.ThinkingLevel
+	Pricing         ai.ModelPricing
 }
     Config configures an OpenAI-compatible model. APIKey may be empty for local
     servers that do not require authentication.

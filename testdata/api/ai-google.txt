@@ -18,6 +18,9 @@ type Config struct {
 	MaxRetries      *int
 	ContextWindow   int
 	MaxOutputTokens int
+	Reasoning       bool
+	ThinkingLevels  []ai.ThinkingLevel
+	Pricing         ai.ModelPricing
 }
     Config configures a Gemini API model. BaseURL is optional
     and should include the API version path when set (for example

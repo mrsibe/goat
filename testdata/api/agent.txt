@@ -6,6 +6,18 @@ Stability: GOAT is pre-1.0 in v0.4 and may still make breaking changes. After
 v1.0, the exported API follows the policy in STABILITY.md at the repository
 root.
 
+CONSTANTS
+
+const (
+	ThinkingOff     = ai.ThinkingOff
+	ThinkingMinimal = ai.ThinkingMinimal
+	ThinkingLow     = ai.ThinkingLow
+	ThinkingMedium  = ai.ThinkingMedium
+	ThinkingHigh    = ai.ThinkingHigh
+	ThinkingXHigh   = ai.ThinkingXHigh
+	ThinkingMax     = ai.ThinkingMax
+)
+
 VARIABLES
 
 var (
@@ -22,6 +34,13 @@ var (
 	// caller's context being canceled.
 	ErrAborted = errors.New("agent: run aborted")
 )
+
+FUNCTIONS
+
+func WithNestedCallRecorder(ctx context.Context) (context.Context, *nestedCallRecorder)
+    WithNestedCallRecorder returns a context that records tool calls made by a
+    tool. Agent.RunToolCall records into it automatically.
+
 
 TYPES
 
@@ -73,6 +92,10 @@ func (a *Agent) Continue(ctx context.Context) (Result, error)
     Continue resumes from the current transcript without adding a new user
     message.
 
+func (a *Agent) Done() <-chan struct{}
+    Done returns a channel that is closed when the active run finishes.
+    It returns nil when no run is active.
+
 func (a *Agent) FollowUp(message ai.Message)
     FollowUp queues a message to run after the agent would otherwise stop.
 
@@ -97,6 +120,9 @@ func (a *Agent) Reset() error
 func (a *Agent) Run(ctx context.Context, input string, images ...ai.ImageContent) (Result, error)
     Run is a convenience alias for Prompt.
 
+func (a *Agent) SetFollowUpMode(mode QueueMode) error
+    SetFollowUpMode changes how queued follow-up messages are drained.
+
 func (a *Agent) SetMessages(messages []ai.Message)
     SetMessages replaces the transcript. The initial system prompt is not
     reinserted automatically; use Reset to restore the configured baseline.
@@ -106,6 +132,9 @@ func (a *Agent) SetModel(model ai.Model) error
 
 func (a *Agent) SetRequestOptions(options ai.RequestOptions)
     SetRequestOptions replaces default request options for future requests.
+
+func (a *Agent) SetSteeringMode(mode QueueMode) error
+    SetSteeringMode changes how queued steering messages are drained.
 
 func (a *Agent) SetThinkingLevel(level ThinkingLevel) error
     SetThinkingLevel changes the reasoning level for future requests.
@@ -119,7 +148,7 @@ func (a *Agent) State() State
 func (a *Agent) Steer(message ai.Message)
     Steer queues a message for injection after the current assistant turn.
 
-func (a *Agent) Subscribe(listener func(Event)) func()
+func (a *Agent) Subscribe(listener func(Event, context.Context)) func()
     Subscribe registers a synchronous event listener and returns an unsubscribe
     function. Listeners run in registration order and are part of run
     settlement.
@@ -166,11 +195,20 @@ type Config struct {
 	ThinkingLevel     ThinkingLevel
 	ThinkingBudgets   map[ThinkingLevel]int
 	TransformMessages MessageTransformer
-	BeforeToolCall    BeforeToolCall
-	AfterToolCall     AfterToolCall
-	PrepareRequest    PrepareRequest
-	PrepareNextTurn   PrepareNextTurn
-	FinishTurn        FinishTurn
+	// TransformContext rewrites the transcript before ConvertToLLM, matching
+	// pi's AgentMessage-level context transform.
+	TransformContext func(context.Context, []ai.Message) ([]ai.Message, error)
+	// ConvertToLLM maps the transcript to provider messages before each request.
+	ConvertToLLM    func([]ai.Message) []ai.Message
+	BeforeToolCall  BeforeToolCall
+	AfterToolCall   AfterToolCall
+	PrepareRequest  PrepareRequest
+	PrepareNextTurn PrepareNextTurn
+	FinishTurn      FinishTurn
+	// GetAPIKey resolves a provider credential before each request. It is
+	// called with the model's provider id; an empty key leaves the configured
+	// credential unchanged.
+	GetAPIKey func(provider string) (string, error)
 }
     Config controls the reusable, stateful agent runtime.
 
@@ -179,7 +217,7 @@ type Event struct {
 	Step                  int          `json:"step,omitempty"`
 	Text                  string       `json:"text,omitempty"`
 	Thinking              string       `json:"thinking,omitempty"`
-	Message               *ai.Message  `json:"message,omitempty"`
+	Message               ai.Message   `json:"message,omitempty"`
 	AssistantMessageEvent *ai.Event    `json:"assistant_message_event,omitempty"`
 	ToolCall              *ai.ToolCall `json:"tool_call,omitempty"`
 	ToolResult            *ToolResult  `json:"tool_result,omitempty"`
@@ -196,21 +234,27 @@ type EventType string
     EventType identifies a lifecycle or streaming event.
 
 const (
-	EventAgentStart    EventType = "agent_start"
-	EventTurnStart     EventType = "turn_start"
-	EventMessageStart  EventType = "message_start"
-	EventMessageUpdate EventType = "message_update"
-	EventMessageDelta  EventType = "message_delta"
-	EventMessageEnd    EventType = "message_end"
-	EventThinkingStart EventType = "thinking_start"
-	EventThinkingDelta EventType = "thinking_delta"
-	EventThinkingEnd   EventType = "thinking_end"
-	EventToolStart     EventType = "tool_start"
-	EventToolUpdate    EventType = "tool_update"
-	EventToolEnd       EventType = "tool_end"
-	EventTurnEnd       EventType = "turn_end"
-	EventAgentEnd      EventType = "agent_end"
-	EventAgentError    EventType = "agent_error"
+	EventAgentStart          EventType = "agent_start"
+	EventTurnStart           EventType = "turn_start"
+	EventMessageStart        EventType = "message_start"
+	EventMessageUpdate       EventType = "message_update"
+	EventMessageDelta        EventType = "message_delta"
+	EventMessageEnd          EventType = "message_end"
+	EventThinkingStart       EventType = "thinking_start"
+	EventThinkingDelta       EventType = "thinking_delta"
+	EventThinkingEnd         EventType = "thinking_end"
+	EventToolExecutionStart  EventType = "tool_execution_start"
+	EventToolExecutionUpdate EventType = "tool_execution_update"
+	EventToolExecutionEnd    EventType = "tool_execution_end"
+	// Deprecated: use EventToolExecutionStart.
+	EventToolStart = EventToolExecutionStart
+	// Deprecated: use EventToolExecutionUpdate.
+	EventToolUpdate = EventToolExecutionUpdate
+	// Deprecated: use EventToolExecutionEnd.
+	EventToolEnd              = EventToolExecutionEnd
+	EventTurnEnd    EventType = "turn_end"
+	EventAgentEnd   EventType = "agent_end"
+	EventAgentError EventType = "agent_error"
 )
 type FinishTurn func(context.Context, TurnContext) (TurnDecision, error)
     FinishTurn runs after the assistant message and tool results are appended,
@@ -270,6 +314,15 @@ type Result struct {
 }
     Result is the complete outcome of one agent run.
 
+type RunToolCallOptions struct {
+	Tools            []Tool
+	AssistantMessage ai.Message
+	Context          AgentContext
+	BeforeToolCall   BeforeToolCall
+	AfterToolCall    AfterToolCall
+}
+    RunToolCallOptions configures RunToolCall.
+
 type State struct {
 	SystemPrompt     string
 	Model            ai.Model
@@ -277,47 +330,47 @@ type State struct {
 	Tools            []Tool
 	Messages         []ai.Message
 	IsStreaming      bool
-	StreamingMessage *ai.Message
+	StreamingMessage ai.Message
 	PendingToolCalls []string
 	ErrorMessage     string
 }
     State is a read-only snapshot of the agent's current conversation state.
 
-type StreamingTool interface {
-	Tool
-	ExecuteStream(ctx context.Context, call ai.ToolCall, update func(ToolResult)) (ToolResult, error)
-}
-    StreamingTool can publish partial results while it executes.
-
-type StreamingToolFunc func(context.Context, ai.ToolCall, func(ToolResult)) (ToolResult, error)
+type StreamingToolFunc func(context.Context, string, json.RawMessage, func(ToolResult)) (ToolResult, error)
     StreamingToolFunc is a function-backed streaming tool implementation.
 
-type ThinkingLevel string
+type ThinkingLevel = ai.ThinkingLevel
     ThinkingLevel is the requested reasoning level for a model turn.
 
-const (
-	ThinkingOff     ThinkingLevel = "off"
-	ThinkingMinimal ThinkingLevel = "minimal"
-	ThinkingLow     ThinkingLevel = "low"
-	ThinkingMedium  ThinkingLevel = "medium"
-	ThinkingHigh    ThinkingLevel = "high"
-	ThinkingXHigh   ThinkingLevel = "xhigh"
-	ThinkingMax     ThinkingLevel = "max"
-)
 type Tool interface {
 	Spec() ToolSpec
-	Execute(ctx context.Context, call ai.ToolCall) (ToolResult, error)
+	Execute(ctx context.Context, callID string, args json.RawMessage, onUpdate func(ToolResult)) (ToolResult, error)
 }
-    Tool is a callable capability exposed to the model.
+    Tool is a callable capability exposed to the model. args is the validated
+    JSON object for the call; onUpdate may be nil when the caller cannot consume
+    partial results.
 
 func NewStreamingTool(spec ToolSpec, fn StreamingToolFunc) Tool
     NewStreamingTool adapts a streaming function into a Tool.
 
-func NewTextTool(spec ToolSpec, fn func(context.Context, ai.ToolCall) (string, error)) Tool
+func NewTextTool(spec ToolSpec, fn func(context.Context, string, json.RawMessage) (string, error)) Tool
     NewTextTool adapts a text-returning function into a Tool.
 
 func NewTool(spec ToolSpec, fn ToolFunc) Tool
     NewTool adapts a function into a Tool.
+
+type ToolCallOutcome struct {
+	ToolCall   ai.ToolCall
+	Result     ToolResult
+	IsError    bool
+	DurationMs int64
+}
+    ToolCallOutcome is the final result of one tool call after hooks ran.
+
+func RunToolCall(ctx context.Context, call ai.ToolCall, options RunToolCallOptions) ToolCallOutcome
+    RunToolCall runs one tool call through argument preparation, schema
+    validation, before/after hooks, and execution, without emitting agent events
+    or appending messages. Failures are reported as error outcomes.
 
 type ToolExecutionMode string
     ToolExecutionMode controls how tool calls in one assistant message execute.
@@ -326,16 +379,25 @@ const (
 	ToolExecutionSequential ToolExecutionMode = "sequential"
 	ToolExecutionParallel   ToolExecutionMode = "parallel"
 )
-type ToolFunc func(context.Context, ai.ToolCall) (ToolResult, error)
-    ToolFunc is a function-backed tool implementation.
+type ToolFunc func(context.Context, string, json.RawMessage) (ToolResult, error)
+    ToolFunc is a non-streaming function-backed tool implementation.
 
+type ToolReplay string
+    ToolReplay is the recovery policy for a tool effect whose durable intent
+    exists but whose outcome is unknown.
+
+const (
+	ToolReplayNever ToolReplay = "never"
+	ToolReplaySafe  ToolReplay = "safe"
+)
 type ToolResult struct {
-	Content           []ai.ContentBlock `json:"content"`
-	Details           json.RawMessage   `json:"details,omitempty"`
-	StructuredContent json.RawMessage   `json:"structured_content,omitempty"`
-	Usage             *ai.Usage         `json:"usage,omitempty"`
-	IsError           bool              `json:"is_error"`
-	Terminate         bool              `json:"terminate,omitempty"`
+	Content           []ai.ContentBlock   `json:"content"`
+	Details           json.RawMessage     `json:"details,omitempty"`
+	StructuredContent json.RawMessage     `json:"structured_content,omitempty"`
+	Usage             *ai.Usage           `json:"usage,omitempty"`
+	NestedCalls       *ai.NestedToolCalls `json:"nested_calls,omitempty"`
+	IsError           bool                `json:"is_error"`
+	Terminate         bool                `json:"terminate,omitempty"`
 }
     ToolResult is the observation returned to the model after a tool call.
 
@@ -355,6 +417,7 @@ type ToolSpec struct {
 	Label            string
 	OutputSchema     map[string]any
 	ExecutionMode    ToolExecutionMode
+	Replay           ToolReplay
 	PrepareArguments func(json.RawMessage) (json.RawMessage, error)
 }
     ToolSpec is the model-facing declaration plus runtime execution hints.

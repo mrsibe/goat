@@ -9,12 +9,33 @@ root.
 
 FUNCTIONS
 
+func ApplyPayloadHook(ctx context.Context, params any) error
+    ApplyPayloadHook lets OnPayload inspect or replace a provider request body.
+    The body is round-tripped through JSON and decoded back into params.
+    Adapters that encode through HookHTTPClient get this automatically; this
+    helper is for adapters that want to hook before encoding.
+
 func CloneRawMessage(raw json.RawMessage) json.RawMessage
     CloneRawMessage deep-copies a JSON payload.
+
+func EmitProviderStreamEvent(ctx context.Context, event any) error
+    EmitProviderStreamEvent forwards one raw provider event to the observer.
+
+func GetCurrentSystemPrompt(messages []Message) string
+    GetCurrentSystemPrompt renders the replayed system message: content followed
+    by named sections. Sections are rendered in name order so the result is
+    deterministic.
+
+func HookHTTPClient(base *http.Client) *http.Client
+    HookHTTPClient wraps a client's transport so identity headers are applied
+    and OnResponse observes the raw HTTP response.
 
 func IsRetryable(err error) bool
     IsRetryable reports whether an error represents a transient provider or
     transport failure. APIError.Retryable is authoritative when set.
+
+func RenderSystemMessage(system SystemMessage) string
+    RenderSystemMessage renders a system message's content and sections.
 
 func Retry(ctx context.Context, policy RetryPolicy, op func(context.Context) error) error
     Retry runs op until it succeeds, returns a non-retryable error, or exhausts
@@ -22,6 +43,13 @@ func Retry(ctx context.Context, policy RetryPolicy, op func(context.Context) err
 
 func RetryDelay(policy RetryPolicy, attempt int) time.Duration
     RetryDelay returns the delay before the given 1-indexed retry attempt.
+
+func ValidateTransport(transport Transport) error
+    ValidateTransport rejects transports GOAT cannot serve.
+
+func WithRequestHooks(ctx context.Context, options RequestOptions, provider string) context.Context
+    WithRequestHooks attaches per-request hooks and identity to the context used
+    by provider adapters.
 
 
 TYPES
@@ -51,6 +79,60 @@ func (e *APIError) Error() string
 
 func (e *APIError) Unwrap() error
 
+type AssistantMessage struct {
+	Content  []ContentBlock `json:"content"`
+	API      API            `json:"api,omitempty"`
+	Provider string         `json:"provider,omitempty"`
+	Model    string         `json:"model,omitempty"`
+	// ResponseModel is the concrete model reported by the provider, when reported.
+	ResponseModel string `json:"responseModel,omitempty"`
+	// ResponseID is a provider-specific response or message identifier.
+	ResponseID string `json:"responseId,omitempty"`
+	// ProviderThinkingLevel is the exact provider-native effort level used.
+	ProviderThinkingLevel string `json:"providerThinkingLevel,omitempty"`
+	// ThinkingLevel is the pi thinking level requested for this response.
+	ThinkingLevel ThinkingLevel   `json:"thinkingLevel,omitempty"`
+	Diagnostics   []Diagnostic    `json:"diagnostics,omitempty"`
+	Usage         Usage           `json:"usage"`
+	StopReason    StopReason      `json:"stopReason,omitempty"`
+	Deferred      *DeferredHandle `json:"deferred,omitempty"`
+	ErrorMessage  string          `json:"errorMessage,omitempty"`
+	RawStopReason string          `json:"rawStopReason,omitempty"`
+	// EndTurn reports whether the model explicitly ended its turn.
+	EndTurn    bool  `json:"endTurn,omitempty"`
+	At         int64 `json:"timestamp,omitempty"`
+	DurationMs int64 `json:"durationMs,omitempty"`
+}
+    AssistantMessage is a model turn.
+
+func AsAssistant(message Message) *AssistantMessage
+    AsAssistant returns the message as an assistant message, or nil.
+
+func NewAssistantMessage(content ...ContentBlock) *AssistantMessage
+    NewAssistantMessage creates an assistant message.
+
+func (m AssistantMessage) MarshalJSON() ([]byte, error)
+    MarshalJSON adds the role discriminator to an assistant message.
+
+func (m *AssistantMessage) Role() Role
+    Role implements Message.
+
+func (m *AssistantMessage) Text() string
+
+func (m *AssistantMessage) Thinking() string
+
+func (m *AssistantMessage) Timestamp() int64
+
+func (m *AssistantMessage) ToolCalls() []ToolCall
+
+type Attribution struct {
+	Name       string
+	URL        string
+	Categories []string
+}
+    Attribution identifies the calling app to providers that support routing
+    headers (currently OpenRouter).
+
 type BlockType string
     BlockType identifies a content block within a message.
 
@@ -58,18 +140,18 @@ const (
 	BlockText     BlockType = "text"
 	BlockThinking BlockType = "thinking"
 	BlockImage    BlockType = "image"
-	BlockToolCall BlockType = "tool_call"
+	BlockToolCall BlockType = "toolCall"
 )
 type ContentBlock struct {
 	Type              BlockType     `json:"type"`
 	Text              string        `json:"text,omitempty"`
-	TextSignature     string        `json:"text_signature,omitempty"`
+	TextSignature     string        `json:"textSignature,omitempty"`
 	Thinking          string        `json:"thinking,omitempty"`
-	ThinkingSignature string        `json:"thinking_signature,omitempty"`
+	ThinkingSignature string        `json:"thinkingSignature,omitempty"`
 	ID                string        `json:"id,omitempty"`
 	Redacted          bool          `json:"redacted,omitempty"`
 	Image             *ImageContent `json:"image,omitempty"`
-	ToolCall          *ToolCall     `json:"tool_call,omitempty"`
+	ToolCall          *ToolCall     `json:"toolCall,omitempty"`
 }
     ContentBlock is one piece of provider-neutral message content.
 
@@ -78,6 +160,55 @@ func CloneContentBlock(block ContentBlock) ContentBlock
 
 func CloneContentBlocks(blocks []ContentBlock) []ContentBlock
     CloneContentBlocks deep-copies content blocks.
+
+type Context struct {
+	SystemPrompt string
+	Messages     []Message
+	Tools        []ToolSpec
+}
+    Context is request input accepted by the public entry points. SystemPrompt
+    and Tools are shorthand for a leading system message; NormalizeContext folds
+    them into one before a provider sees the request.
+
+type Cost struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+	Total      float64 `json:"total"`
+	// TotalFromProvider is true when Total is billed cost reported by the
+	// provider rather than a catalog estimate.
+	TotalFromProvider bool `json:"totalFromProvider,omitempty"`
+}
+    Cost is the monetary cost of one request.
+
+type DeferredHandle struct {
+	Provider    string          `json:"provider"`
+	ModelID     string          `json:"modelId"`
+	API         string          `json:"api"`
+	ID          string          `json:"id"`
+	ExpiresAt   int64           `json:"expiresAt,omitempty"`
+	PollAfterMs int64           `json:"pollAfterMs,omitempty"`
+	Data        json.RawMessage `json:"data,omitempty"`
+}
+    DeferredHandle identifies a provider-side deferred response.
+
+type Diagnostic struct {
+	Type      string           `json:"type"`
+	Timestamp int64            `json:"timestamp"`
+	Error     *DiagnosticError `json:"error,omitempty"`
+	Details   json.RawMessage  `json:"details,omitempty"`
+}
+    Diagnostic is a redacted provider or runtime diagnostic attached to an
+    assistant message.
+
+type DiagnosticError struct {
+	Name    string `json:"name,omitempty"`
+	Message string `json:"message"`
+	Stack   string `json:"stack,omitempty"`
+	Code    any    `json:"code,omitempty"`
+}
+    DiagnosticError describes the captured failure of a diagnostic.
 
 type Event struct {
 	Type          EventType      `json:"type"`
@@ -88,8 +219,8 @@ type Event struct {
 	ThinkingDelta string         `json:"thinking_delta,omitempty"`
 	ToolCall      *ToolCall      `json:"tool_call,omitempty"`
 	ToolCallDelta *ToolCallDelta `json:"tool_call_delta,omitempty"`
-	Partial       *Message       `json:"partial,omitempty"`
-	Message       *Message       `json:"message,omitempty"`
+	Partial       Message        `json:"partial,omitempty"`
+	Message       Message        `json:"message,omitempty"`
 	Usage         *Usage         `json:"usage,omitempty"`
 	StopReason    StopReason     `json:"stop_reason,omitempty"`
 	Err           error          `json:"-"`
@@ -117,35 +248,29 @@ const (
 	EventDone          EventType = "done"
 	EventError         EventType = "error"
 )
+type Identity struct {
+	UserAgent   string
+	Attribution *Attribution
+}
+    Identity overrides request identification headers.
+
 type ImageContent struct {
-	Data      string `json:"data,omitempty"`
-	URL       string `json:"url,omitempty"`
-	MediaType string `json:"media_type,omitempty"`
+	Data     string `json:"data,omitempty"`
+	URL      string `json:"url,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
 }
     ImageContent is an inline image or image URL.
 
-type Message struct {
-	Role              Role            `json:"role"`
-	Content           []ContentBlock  `json:"content"`
-	ToolCallID        string          `json:"tool_call_id,omitempty"`
-	ToolName          string          `json:"tool_name,omitempty"`
-	IsError           bool            `json:"is_error,omitempty"`
-	Timestamp         int64           `json:"timestamp,omitempty"`
-	Details           json.RawMessage `json:"details,omitempty"`
-	StructuredContent json.RawMessage `json:"structured_content,omitempty"`
-	Usage             *Usage          `json:"usage,omitempty"`
-	StopReason        StopReason      `json:"stop_reason,omitempty"`
-	Provider          string          `json:"provider,omitempty"`
-	Model             string          `json:"model,omitempty"`
-	API               API             `json:"api,omitempty"`
-	ResponseModel     string          `json:"response_model,omitempty"`
-	ResponseID        string          `json:"response_id,omitempty"`
-	ErrorMessage      string          `json:"error_message,omitempty"`
-	DurationMs        int64           `json:"duration_ms,omitempty"`
+type Message interface {
+	Role() Role
+	Text() string
+	Thinking() string
+	ToolCalls() []ToolCall
+	Timestamp() int64
+	// Has unexported methods.
 }
-    Message is a provider-neutral chat message. Assistant messages use tool-call
-    blocks for model-requested tools; tool messages use ToolCallID to correlate
-    the result with its request.
+    Message is one provider-neutral transcript message. It is a closed union:
+    only the four message types in this package implement it.
 
 func CloneMessage(message Message) Message
     CloneMessage deep-copies a message.
@@ -154,26 +279,19 @@ func CloneMessages(messages []Message) []Message
     CloneMessages deep-copies a message slice.
 
 func TextMessage(role Role, text string) Message
-    TextMessage creates a message containing one text block.
+    TextMessage creates a message of the given role containing one text block.
 
 func ToolMessage(callID, toolName, text string) Message
     ToolMessage creates a successful text tool-result message.
 
-func ToolResultMessage(callID, toolName string, content []ContentBlock, isError bool) Message
-    ToolResultMessage creates a tool-result message with arbitrary content
-    blocks.
-
 func ToolTextMessage(callID, toolName, text string, isError bool) Message
     ToolTextMessage creates a tool-result message containing one text block.
 
-func (m Message) Text() string
-    Text returns all text blocks in the message joined without separators.
+func UnmarshalMessage(data []byte) (Message, error)
+    UnmarshalMessage decodes one message using its role discriminator.
 
-func (m Message) Thinking() string
-    Thinking returns all thinking blocks joined without separators.
-
-func (m Message) ToolCalls() []ToolCall
-    ToolCalls returns all tool-call blocks in source order.
+func UnmarshalMessages(data []byte) ([]Message, error)
+    UnmarshalMessages decodes a JSON array of messages.
 
 type Model interface {
 	Info() ModelInfo
@@ -191,9 +309,55 @@ type ModelInfo struct {
 	SupportsImages           bool   `json:"supports_images,omitempty"`
 	SupportsToolResultImages bool   `json:"supports_tool_result_images,omitempty"`
 	SupportsThinking         bool   `json:"supports_thinking,omitempty"`
+	// Reasoning reports whether the model exposes a reasoning/thinking mode.
+	Reasoning bool `json:"reasoning,omitempty"`
+	// ThinkingLevels lists explicitly supported levels. Empty means off..high
+	// when Reasoning is true; xhigh and max always require an explicit entry.
+	ThinkingLevels []ThinkingLevel `json:"thinking_levels,omitempty"`
+	// Pricing is the per-million-token price used by Usage.ApplyCost.
+	Pricing ModelPricing `json:"pricing,omitempty"`
 }
     ModelInfo describes a concrete model and the protocol capabilities exposed
     by its adapter. Model-specific limitations still apply.
+
+func (info ModelInfo) ClampThinkingLevel(level ThinkingLevel) ThinkingLevel
+    ClampThinkingLevel returns the requested level when supported, otherwise the
+    closest supported lower level.
+
+func (info ModelInfo) SupportsThinkingLevel(level ThinkingLevel) bool
+    SupportsThinkingLevel reports whether the model accepts the level.
+
+type ModelPricing struct {
+	Input      float64 `json:"input,omitempty"`
+	Output     float64 `json:"output,omitempty"`
+	CacheRead  float64 `json:"cache_read,omitempty"`
+	CacheWrite float64 `json:"cache_write,omitempty"`
+}
+    ModelPricing is a per-million-token price table.
+
+func (p ModelPricing) ApplyCost(usage *Usage)
+    ApplyCost fills usage.Cost from the pricing table.
+
+func (p ModelPricing) Calculate(usage Usage) Cost
+    Calculate returns the cost of one usage report at this price table.
+    Anthropic 1h cache writes are billed at twice the base input rate.
+
+type NestedToolCallRecord struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Arguments      json.RawMessage `json:"arguments,omitempty"`
+	ArgumentsBytes int             `json:"argumentsBytes,omitempty"`
+	Status         string          `json:"status"`
+	DurationMs     int64           `json:"durationMs,omitempty"`
+	Error          string          `json:"error,omitempty"`
+}
+    NestedToolCallRecord is a tool call another tool made while it ran.
+
+type NestedToolCalls struct {
+	Calls    []NestedToolCallRecord `json:"calls"`
+	Complete bool                   `json:"complete"`
+}
+    NestedToolCalls is a bounded record of the calls a tool made.
 
 type Request struct {
 	Messages []Message      `json:"messages"`
@@ -210,6 +374,30 @@ type RequestOptions struct {
 	SessionID            string     `json:"session_id,omitempty"`
 	ReasoningEffort      string     `json:"reasoning_effort,omitempty"`
 	ThinkingBudgetTokens int        `json:"thinking_budget_tokens,omitempty"`
+
+	// APIKey overrides the provider credential for this request.
+	APIKey string `json:"-"`
+	// OnPayload inspects or replaces the provider request body. Returning nil
+	// keeps the payload unchanged.
+	OnPayload func(map[string]any) (map[string]any, error) `json:"-"`
+	// OnResponse observes the raw HTTP response before its body is consumed.
+	OnResponse func(status int, headers http.Header) error `json:"-"`
+	// OnProviderStreamEvent observes each raw provider stream event before
+	// normalization.
+	OnProviderStreamEvent func(event any) error `json:"-"`
+	// Identity overrides User-Agent and provider attribution headers.
+	Identity *Identity `json:"-"`
+	// Transport selects a preferred transport; GOAT rejects "websocket".
+	Transport Transport `json:"transport,omitempty"`
+	// TimeoutMs caps the provider request duration when the adapter supports it.
+	TimeoutMs int `json:"timeout_ms,omitempty"`
+	// MaxRetries caps client-side retries when the adapter supports it.
+	MaxRetries int `json:"max_retries,omitempty"`
+	// MaxRetryDelayMs caps provider-requested retry delays. Adapters that rely
+	// on SDK retries ignore it.
+	MaxRetryDelayMs int `json:"max_retry_delay_ms,omitempty"`
+	// SamplingParams is merged into OpenAI-compatible request bodies.
+	SamplingParams map[string]any `json:"sampling_params,omitempty"`
 }
     RequestOptions contains per-request sampling and routing controls. Empty
     values leave the provider default in place.
@@ -230,17 +418,24 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
-	RoleTool      Role = "tool"
+	// RoleToolResult is pi's tool-result role name.
+	RoleToolResult Role = "toolResult"
+	// Deprecated: use RoleToolResult.
+	RoleTool = RoleToolResult
 )
 type StopReason string
     StopReason describes why a model turn ended.
 
 const (
-	StopReasonStop      StopReason = "stop"
-	StopReasonLength    StopReason = "length"
-	StopReasonToolCalls StopReason = "tool_calls"
-	StopReasonError     StopReason = "error"
-	StopReasonAborted   StopReason = "aborted"
+	StopReasonPending  StopReason = "pending"
+	StopReasonStop     StopReason = "stop"
+	StopReasonLength   StopReason = "length"
+	StopReasonToolUse  StopReason = "toolUse"
+	StopReasonError    StopReason = "error"
+	StopReasonAborted  StopReason = "aborted"
+	StopReasonDeferred StopReason = "deferred"
+	// Deprecated: use StopReasonToolUse.
+	StopReasonToolCalls = StopReasonToolUse
 )
 type Stream interface {
 	Next() (Event, error)
@@ -249,13 +444,73 @@ type Stream interface {
     Stream yields normalized model events. Next returns io.EOF after the final
     event. The caller always closes the stream.
 
+type SystemMessage struct {
+	Content  string             `json:"content,omitempty"`
+	Sections map[string]*string `json:"sections,omitempty"`
+	// SectionOrder preserves insertion order, which Go maps cannot express.
+	SectionOrder []string        `json:"sectionOrder,omitempty"`
+	ToolsAdded   []ToolSpec      `json:"toolsAdded,omitempty"`
+	ToolsRemoved []ToolReference `json:"toolsRemoved,omitempty"`
+	At           int64           `json:"timestamp,omitempty"`
+}
+    SystemMessage carries instructions and, from the first message on, the tool
+    declarations. Later system messages add instructions, replace or remove
+    named sections, and add or remove tools.
+
+func AsSystem(message Message) *SystemMessage
+    AsSystem returns the message as a system message, or nil.
+
+func GetCurrentSystemMessage(messages []Message) *SystemMessage
+    GetCurrentSystemMessage replays every system message in order and returns
+    the effective prompt: later content is appended, sections replace or remove
+    named sections, and tool declarations accumulate.
+
+func GetInitialSystemMessage(messages []Message) *SystemMessage
+    GetInitialSystemMessage returns the leading system message, if any.
+
+func NewSystemMessage(text string) *SystemMessage
+    NewSystemMessage creates a system message.
+
+func (m SystemMessage) MarshalJSON() ([]byte, error)
+    MarshalJSON adds the role discriminator to a system message.
+
+func (m *SystemMessage) Role() Role
+    Role implements Message.
+
+func (m *SystemMessage) SetSection(name string, value *string)
+    SetSection sets or removes a named section, preserving insertion order.
+
+func (m *SystemMessage) Text() string
+    Text returns the message's text blocks joined without separators.
+
+func (m *SystemMessage) Thinking() string
+    Thinking returns the message's thinking blocks joined without separators.
+
+func (m *SystemMessage) Timestamp() int64
+    Timestamp returns the message creation time in Unix milliseconds.
+
+func (m *SystemMessage) ToolCalls() []ToolCall
+    ToolCalls returns the message's tool calls in source order.
+
+type ThinkingLevel string
+    ThinkingLevel is the requested reasoning level for a model turn.
+
+const (
+	ThinkingOff     ThinkingLevel = "off"
+	ThinkingMinimal ThinkingLevel = "minimal"
+	ThinkingLow     ThinkingLevel = "low"
+	ThinkingMedium  ThinkingLevel = "medium"
+	ThinkingHigh    ThinkingLevel = "high"
+	ThinkingXHigh   ThinkingLevel = "xhigh"
+	ThinkingMax     ThinkingLevel = "max"
+)
 type ToolCall struct {
 	ID               string          `json:"id"`
-	ItemID           string          `json:"item_id,omitempty"`
+	ItemID           string          `json:"itemId,omitempty"`
 	Name             string          `json:"name"`
 	Arguments        json.RawMessage `json:"arguments"`
-	ArgumentsError   string          `json:"arguments_error,omitempty"`
-	ThoughtSignature string          `json:"thought_signature,omitempty"`
+	ArgumentsError   string          `json:"argumentsError,omitempty"`
+	ThoughtSignature string          `json:"thoughtSignature,omitempty"`
 	Namespace        string          `json:"namespace,omitempty"`
 }
     ToolCall is a completed tool invocation requested by the model.
@@ -288,6 +543,46 @@ const (
 	ToolChoiceRequired ToolChoiceMode = "required"
 	ToolChoiceNamed    ToolChoiceMode = "named"
 )
+type ToolReference struct {
+	Name string `json:"name"`
+}
+    ToolReference names a tool that stops being available.
+
+type ToolResultMessage struct {
+	ToolCallID        string           `json:"toolCallId"`
+	ToolName          string           `json:"toolName"`
+	Content           []ContentBlock   `json:"content"`
+	Details           json.RawMessage  `json:"details,omitempty"`
+	StructuredContent json.RawMessage  `json:"structuredContent,omitempty"`
+	Usage             *Usage           `json:"usage,omitempty"`
+	NestedCalls       *NestedToolCalls `json:"nestedCalls,omitempty"`
+	IsError           bool             `json:"isError,omitempty"`
+	At                int64            `json:"timestamp,omitempty"`
+	DurationMs        int64            `json:"durationMs,omitempty"`
+}
+    ToolResultMessage is the observation returned to the model after a tool
+    call.
+
+func AsToolResult(message Message) *ToolResultMessage
+    AsToolResult returns the message as a tool-result message, or nil.
+
+func NewToolResultMessage(callID, toolName string, content []ContentBlock, isError bool) *ToolResultMessage
+    NewToolResultMessage creates a tool-result message with arbitrary blocks.
+
+func (m ToolResultMessage) MarshalJSON() ([]byte, error)
+    MarshalJSON adds the role discriminator to a tool-result message.
+
+func (m *ToolResultMessage) Role() Role
+    Role implements Message.
+
+func (m *ToolResultMessage) Text() string
+
+func (m *ToolResultMessage) Thinking() string
+
+func (m *ToolResultMessage) Timestamp() int64
+
+func (m *ToolResultMessage) ToolCalls() []ToolCall
+
 type ToolSpec struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
@@ -295,16 +590,81 @@ type ToolSpec struct {
 }
     ToolSpec describes a tool to the model.
 
-type Usage struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
-	ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"`
-	TotalTokens      int64 `json:"total_tokens"`
+func GetCurrentTools(messages []Message) []ToolSpec
+    GetCurrentTools returns the tool set declared by the transcript.
+
+func GetDeclaredTools(messages []Message) []ToolSpec
+    GetDeclaredTools is an alias for GetCurrentTools.
+
+type ToolStateChanges struct {
+	ToolsAdded   []ToolSpec
+	ToolsRemoved []ToolReference
 }
-    Usage contains token counts reported by a model provider.
+    ToolStateChanges is the delta between two tool sets.
+
+func GetToolStateChanges(previous, current []ToolSpec) ToolStateChanges
+    GetToolStateChanges computes the declarations needed to turn previous into
+    current.
+
+func (c ToolStateChanges) HasToolChanges() bool
+    HasToolChanges reports whether the delta is empty.
+
+type TranscriptContext struct {
+	Messages []Message
+}
+    TranscriptContext is a normalized request context: the prompt and tool
+    declarations live in the leading system message, never beside the messages.
+
+func NormalizeContext(input Context) TranscriptContext
+    NormalizeContext folds SystemPrompt and Tools into a leading system message.
+
+type Transport string
+    Transport is a preferred model transport. GOAT currently serves every
+    provider over HTTP; "websocket" is rejected by adapters.
+
+const (
+	TransportAuto      Transport = "auto"
+	TransportSSE       Transport = "sse"
+	TransportWebSocket Transport = "websocket"
+)
+type Usage struct {
+	Input        int64 `json:"input"`
+	Output       int64 `json:"output"`
+	CacheRead    int64 `json:"cacheRead"`
+	CacheWrite   int64 `json:"cacheWrite"`
+	CacheWrite1H int64 `json:"cacheWrite1h,omitempty"`
+	Reasoning    int64 `json:"reasoning,omitempty"`
+	TotalTokens  int64 `json:"totalTokens"`
+	Cost         Cost  `json:"cost"`
+}
+    Usage contains token counts and derived cost reported by a model provider.
 
 func (u *Usage) Add(other Usage)
     Add accumulates another usage report.
+
+type UserMessage struct {
+	Content []ContentBlock `json:"content"`
+	At      int64          `json:"timestamp,omitempty"`
+}
+    UserMessage is a user turn.
+
+func AsUser(message Message) *UserMessage
+    AsUser returns the message as a user message, or nil.
+
+func NewUserMessage(content ...ContentBlock) *UserMessage
+    NewUserMessage creates a user message.
+
+func (m UserMessage) MarshalJSON() ([]byte, error)
+    MarshalJSON adds the role discriminator to a user message.
+
+func (m *UserMessage) Role() Role
+    Role implements Message.
+
+func (m *UserMessage) Text() string
+
+func (m *UserMessage) Thinking() string
+
+func (m *UserMessage) Timestamp() int64
+
+func (m *UserMessage) ToolCalls() []ToolCall
 
