@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -13,10 +14,10 @@ import (
 )
 
 func TestAgentConformanceMatrix(t *testing.T) {
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
-	terminate := agent.NewTool(agent.ToolSpec{Name: "stop"}, func(context.Context, ai.ToolCall) (agent.ToolResult, error) {
+	terminate := agent.NewTool(agent.ToolSpec{Name: "stop"}, func(context.Context, string, json.RawMessage) (agent.ToolResult, error) {
 		result := agent.TextResult("stopped")
 		result.Terminate = true
 		return result, nil

@@ -60,6 +60,15 @@ func (r ToolResult) clone() ToolResult {
 	return cloned
 }
 
+// ToolReplay is the recovery policy for a tool effect whose durable intent
+// exists but whose outcome is unknown.
+type ToolReplay string
+
+const (
+	ToolReplayNever ToolReplay = "never"
+	ToolReplaySafe  ToolReplay = "safe"
+)
+
 // ToolSpec is the model-facing declaration plus runtime execution hints.
 type ToolSpec struct {
 	Name             string
@@ -68,26 +77,23 @@ type ToolSpec struct {
 	Label            string
 	OutputSchema     map[string]any
 	ExecutionMode    ToolExecutionMode
+	Replay           ToolReplay
 	PrepareArguments func(json.RawMessage) (json.RawMessage, error)
 }
 
-// Tool is a callable capability exposed to the model.
+// Tool is a callable capability exposed to the model. args is the validated
+// JSON object for the call; onUpdate may be nil when the caller cannot consume
+// partial results.
 type Tool interface {
 	Spec() ToolSpec
-	Execute(ctx context.Context, call ai.ToolCall) (ToolResult, error)
+	Execute(ctx context.Context, callID string, args json.RawMessage, onUpdate func(ToolResult)) (ToolResult, error)
 }
 
-// StreamingTool can publish partial results while it executes.
-type StreamingTool interface {
-	Tool
-	ExecuteStream(ctx context.Context, call ai.ToolCall, update func(ToolResult)) (ToolResult, error)
-}
-
-// ToolFunc is a function-backed tool implementation.
-type ToolFunc func(context.Context, ai.ToolCall) (ToolResult, error)
+// ToolFunc is a non-streaming function-backed tool implementation.
+type ToolFunc func(context.Context, string, json.RawMessage) (ToolResult, error)
 
 // StreamingToolFunc is a function-backed streaming tool implementation.
-type StreamingToolFunc func(context.Context, ai.ToolCall, func(ToolResult)) (ToolResult, error)
+type StreamingToolFunc func(context.Context, string, json.RawMessage, func(ToolResult)) (ToolResult, error)
 
 type functionTool struct {
 	spec   ToolSpec
@@ -98,7 +104,7 @@ type functionTool struct {
 // NewTool adapts a function into a Tool.
 func NewTool(spec ToolSpec, fn ToolFunc) Tool {
 	if fn == nil {
-		fn = func(context.Context, ai.ToolCall) (ToolResult, error) {
+		fn = func(context.Context, string, json.RawMessage) (ToolResult, error) {
 			return ToolResult{}, errors.New("tool handler is nil")
 		}
 	}
@@ -106,12 +112,12 @@ func NewTool(spec ToolSpec, fn ToolFunc) Tool {
 }
 
 // NewTextTool adapts a text-returning function into a Tool.
-func NewTextTool(spec ToolSpec, fn func(context.Context, ai.ToolCall) (string, error)) Tool {
+func NewTextTool(spec ToolSpec, fn func(context.Context, string, json.RawMessage) (string, error)) Tool {
 	if fn == nil {
 		return NewTool(spec, nil)
 	}
-	return NewTool(spec, func(ctx context.Context, call ai.ToolCall) (ToolResult, error) {
-		text, err := fn(ctx, call)
+	return NewTool(spec, func(ctx context.Context, callID string, args json.RawMessage) (ToolResult, error) {
+		text, err := fn(ctx, callID, args)
 		if err != nil {
 			return ToolResult{}, err
 		}
@@ -126,8 +132,8 @@ func NewStreamingTool(spec ToolSpec, fn StreamingToolFunc) Tool {
 	}
 	return &functionTool{
 		spec: cloneToolSpec(spec),
-		fn: func(ctx context.Context, call ai.ToolCall) (ToolResult, error) {
-			return fn(ctx, call, func(ToolResult) {})
+		fn: func(ctx context.Context, callID string, args json.RawMessage) (ToolResult, error) {
+			return fn(ctx, callID, args, nil)
 		},
 		stream: fn,
 	}
@@ -137,20 +143,18 @@ func (t *functionTool) Spec() ToolSpec {
 	return cloneToolSpec(t.spec)
 }
 
-func (t *functionTool) Execute(ctx context.Context, call ai.ToolCall) (ToolResult, error) {
-	result, err := t.fn(ctx, call)
-	return result.clone(), err
-}
-
-func (t *functionTool) ExecuteStream(ctx context.Context, call ai.ToolCall, update func(ToolResult)) (ToolResult, error) {
-	if t.stream == nil {
-		return t.Execute(ctx, call)
+func (t *functionTool) Execute(ctx context.Context, callID string, args json.RawMessage, onUpdate func(ToolResult)) (ToolResult, error) {
+	var result ToolResult
+	var err error
+	if t.stream != nil {
+		result, err = t.stream(ctx, callID, args, func(partial ToolResult) {
+			if onUpdate != nil {
+				onUpdate(partial.clone())
+			}
+		})
+	} else {
+		result, err = t.fn(ctx, callID, args)
 	}
-	result, err := t.stream(ctx, call, func(partial ToolResult) {
-		if update != nil {
-			update(partial.clone())
-		}
-	})
 	return result.clone(), err
 }
 

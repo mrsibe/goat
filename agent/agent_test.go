@@ -97,7 +97,7 @@ func TestMessageUpdateExposesStreamingAssistantEvents(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{echo}})
@@ -165,7 +165,7 @@ func TestAbortDuringToolPreflightPreventsExecution(t *testing.T) {
 		}},
 	)
 	var executed atomic.Bool
-	tool := agent.NewTextTool(agent.ToolSpec{Name: "side_effect"}, func(context.Context, ai.ToolCall) (string, error) {
+	tool := agent.NewTextTool(agent.ToolSpec{Name: "side_effect"}, func(context.Context, string, json.RawMessage) (string, error) {
 		executed.Store(true)
 		return "ran", nil
 	})
@@ -218,9 +218,11 @@ func TestToolExecutionAndContinue(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	var received ai.ToolCall
-	weather := agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(_ context.Context, call ai.ToolCall) (string, error) {
-		received = call
+	var receivedID string
+	var receivedArgs string
+	weather := agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(_ context.Context, callID string, args json.RawMessage) (string, error) {
+		receivedID = callID
+		receivedArgs = string(args)
 		return "sunny", nil
 	})
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{weather}})
@@ -233,8 +235,8 @@ func TestToolExecutionAndContinue(t *testing.T) {
 	if result.Answer != "晴，25°C" || result.Steps != 2 {
 		t.Fatalf("result = %+v", result)
 	}
-	if received.ID != "call_1" || received.Name != "weather" || string(received.Arguments) != `{"city":"北京"}` {
-		t.Fatalf("received call = %+v", received)
+	if receivedID != "call_1" || receivedArgs != `{"city":"北京"}` {
+		t.Fatalf("received call = %q %q", receivedID, receivedArgs)
 	}
 	if len(model.Requests) != 2 {
 		t.Fatalf("requests = %d", len(model.Requests))
@@ -273,17 +275,19 @@ func TestToolCallLifecycleWithoutDoneMessage(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	var received ai.ToolCall
-	weather := agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(_ context.Context, call ai.ToolCall) (string, error) {
-		received = call
+	var receivedID string
+	var receivedArgs string
+	weather := agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(_ context.Context, callID string, args json.RawMessage) (string, error) {
+		receivedID = callID
+		receivedArgs = string(args)
 		return "sunny", nil
 	})
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{weather}})
 	if _, err := a.Prompt(context.Background(), "天气"); err != nil {
 		t.Fatal(err)
 	}
-	if received.Name != "weather" || string(received.Arguments) != `{"city":"北京"}` {
-		t.Fatalf("received call = %+v", received)
+	if receivedID != "call_1" || receivedArgs != `{"city":"北京"}` {
+		t.Fatalf("received call = %q %q", receivedID, receivedArgs)
 	}
 }
 
@@ -306,7 +310,7 @@ func TestStreamingPreservesContentBlockOrder(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{echo}})
@@ -338,14 +342,14 @@ func TestToolErrorsAndPanicsAreObservations(t *testing.T) {
 	}{
 		{
 			name: "tool error",
-			tool: agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(context.Context, ai.ToolCall) (string, error) {
+			tool: agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(context.Context, string, json.RawMessage) (string, error) {
 				return "", errors.New("upstream failed")
 			}),
 			want: "failed",
 		},
 		{
 			name: "panic",
-			tool: agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(context.Context, ai.ToolCall) (string, error) {
+			tool: agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(context.Context, string, json.RawMessage) (string, error) {
 				panic("boom")
 			}),
 			want: "panicked",
@@ -386,7 +390,7 @@ func TestBeforeAndAfterToolHooks(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
 	var beforeCalled, afterCalled bool
@@ -434,7 +438,7 @@ func TestBeforeToolCallCanBlock(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
 	a := newAgent(t, agent.Config{
@@ -478,7 +482,7 @@ func TestUnknownAndInvalidToolCallsAreObservations(t *testing.T) {
 			},
 			"required": []string{"city"},
 		},
-	}, func(context.Context, ai.ToolCall) (string, error) {
+	}, func(context.Context, string, json.RawMessage) (string, error) {
 		executed = true
 		return "sunny", nil
 	})
@@ -520,7 +524,7 @@ func TestMaxStepsAndHistoryMutation(t *testing.T) {
 		{Type: ai.EventDone, StopReason: ai.StopReasonToolCalls},
 	}}
 	model := faux.New(turn, turn)
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{echo}, MaxSteps: 2})
@@ -570,7 +574,7 @@ func TestOutputLengthSemantics(t *testing.T) {
 		}},
 	)
 	executed := false
-	weather := agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(context.Context, ai.ToolCall) (string, error) {
+	weather := agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(context.Context, string, json.RawMessage) (string, error) {
 		executed = true
 		return "sunny", nil
 	})
@@ -675,7 +679,7 @@ func TestParallelToolExecutionPreservesModelOrder(t *testing.T) {
 	)
 	slowStarted := make(chan struct{})
 	fastDone := make(chan struct{})
-	slow := agent.NewTextTool(agent.ToolSpec{Name: "slow"}, func(ctx context.Context, _ ai.ToolCall) (string, error) {
+	slow := agent.NewTextTool(agent.ToolSpec{Name: "slow"}, func(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
 		close(slowStarted)
 		select {
 		case <-fastDone:
@@ -684,7 +688,7 @@ func TestParallelToolExecutionPreservesModelOrder(t *testing.T) {
 			return "", ctx.Err()
 		}
 	})
-	fast := agent.NewTextTool(agent.ToolSpec{Name: "fast"}, func(ctx context.Context, _ ai.ToolCall) (string, error) {
+	fast := agent.NewTextTool(agent.ToolSpec{Name: "fast"}, func(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
 		select {
 		case <-slowStarted:
 			close(fastDone)
@@ -717,11 +721,11 @@ func TestPerToolSequentialForcesBatchOrder(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	slow := agent.NewTextTool(agent.ToolSpec{Name: "slow", ExecutionMode: agent.ToolExecutionSequential}, func(context.Context, ai.ToolCall) (string, error) {
+	slow := agent.NewTextTool(agent.ToolSpec{Name: "slow", ExecutionMode: agent.ToolExecutionSequential}, func(context.Context, string, json.RawMessage) (string, error) {
 		time.Sleep(20 * time.Millisecond)
 		return "slow", nil
 	})
-	fast := agent.NewTextTool(agent.ToolSpec{Name: "fast"}, func(context.Context, ai.ToolCall) (string, error) {
+	fast := agent.NewTextTool(agent.ToolSpec{Name: "fast"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "fast", nil
 	})
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{slow, fast}})
@@ -751,7 +755,7 @@ func TestStreamingToolUpdatesAndTerminate(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	streamTool := agent.NewStreamingTool(agent.ToolSpec{Name: "stream"}, func(_ context.Context, _ ai.ToolCall, update func(agent.ToolResult)) (agent.ToolResult, error) {
+	streamTool := agent.NewStreamingTool(agent.ToolSpec{Name: "stream"}, func(_ context.Context, _ string, _ json.RawMessage, update func(agent.ToolResult)) (agent.ToolResult, error) {
 		update(agent.TextResult("first"))
 		update(agent.TextResult("second"))
 		result := agent.TextResult("done")
@@ -790,7 +794,7 @@ func TestLateToolUpdatesAreIgnored(t *testing.T) {
 		}},
 	)
 	release := make(chan struct{})
-	streamTool := agent.NewStreamingTool(agent.ToolSpec{Name: "stream"}, func(_ context.Context, _ ai.ToolCall, update func(agent.ToolResult)) (agent.ToolResult, error) {
+	streamTool := agent.NewStreamingTool(agent.ToolSpec{Name: "stream"}, func(_ context.Context, _ string, _ json.RawMessage, update func(agent.ToolResult)) (agent.ToolResult, error) {
 		go func() {
 			<-release
 			update(agent.TextResult("late"))
@@ -824,7 +828,7 @@ func TestToolUpdatesFinishBeforeToolEnd(t *testing.T) {
 	)
 	inListener := make(chan struct{})
 	releaseListener := make(chan struct{})
-	streamTool := agent.NewStreamingTool(agent.ToolSpec{Name: "stream"}, func(_ context.Context, _ ai.ToolCall, update func(agent.ToolResult)) (agent.ToolResult, error) {
+	streamTool := agent.NewStreamingTool(agent.ToolSpec{Name: "stream"}, func(_ context.Context, _ string, _ json.RawMessage, update func(agent.ToolResult)) (agent.ToolResult, error) {
 		go update(agent.TextResult("progress"))
 		<-inListener
 		return agent.TextResult("done"), nil
@@ -890,11 +894,11 @@ func TestParallelToolsPreflightBeforeExecution(t *testing.T) {
 	firstStartedCh := make(chan struct{})
 	var mu sync.Mutex
 	preflightSawExecution := false
-	first := agent.NewTextTool(agent.ToolSpec{Name: "first"}, func(context.Context, ai.ToolCall) (string, error) {
+	first := agent.NewTextTool(agent.ToolSpec{Name: "first"}, func(context.Context, string, json.RawMessage) (string, error) {
 		firstStarted.Do(func() { close(firstStartedCh) })
 		return "first", nil
 	})
-	second := agent.NewTextTool(agent.ToolSpec{Name: "second"}, func(context.Context, ai.ToolCall) (string, error) {
+	second := agent.NewTextTool(agent.ToolSpec{Name: "second"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "second", nil
 	})
 	a := newAgent(t, agent.Config{
@@ -935,7 +939,7 @@ func TestAfterToolCallContentReplacementClearsStructuredContent(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	echo := agent.NewTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (agent.ToolResult, error) {
+	echo := agent.NewTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (agent.ToolResult, error) {
 		return agent.ToolResult{
 			Content:           []ai.ContentBlock{{Type: ai.BlockText, Text: "original"}},
 			StructuredContent: json.RawMessage(`{"v":1}`),
@@ -963,7 +967,7 @@ func TestAfterToolCallContentReplacementClearsStructuredContent(t *testing.T) {
 func TestContinueBusyKeepsQueuedMessages(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
-	blocking := agent.NewTextTool(agent.ToolSpec{Name: "block"}, func(context.Context, ai.ToolCall) (string, error) {
+	blocking := agent.NewTextTool(agent.ToolSpec{Name: "block"}, func(context.Context, string, json.RawMessage) (string, error) {
 		close(started)
 		<-release
 		return "ok", nil
@@ -1078,7 +1082,7 @@ func TestPrepareRequestFinishTurnAndPrepareNextTurn(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
 	var preparedRequest bool
@@ -1213,7 +1217,7 @@ func TestContinueValidationAndAssistantQueueFallback(t *testing.T) {
 
 func TestAbortAndWaitForIdle(t *testing.T) {
 	started := make(chan struct{})
-	blocking := agent.NewTool(agent.ToolSpec{Name: "block"}, func(ctx context.Context, _ ai.ToolCall) (agent.ToolResult, error) {
+	blocking := agent.NewTool(agent.ToolSpec{Name: "block"}, func(ctx context.Context, _ string, _ json.RawMessage) (agent.ToolResult, error) {
 		close(started)
 		<-ctx.Done()
 		return agent.ToolResult{}, ctx.Err()
@@ -1305,7 +1309,7 @@ func TestToolResultDetailsStructuredContentAndUsage(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	detailTool := agent.NewTool(agent.ToolSpec{Name: "detail"}, func(context.Context, ai.ToolCall) (agent.ToolResult, error) {
+	detailTool := agent.NewTool(agent.ToolSpec{Name: "detail"}, func(context.Context, string, json.RawMessage) (agent.ToolResult, error) {
 		return agent.ToolResult{
 			Content:           []ai.ContentBlock{{Type: ai.BlockText, Text: "preview"}},
 			Details:           json.RawMessage(`{"audited":true}`),
@@ -1338,7 +1342,7 @@ func TestToolResultImagesAndInvalidContent(t *testing.T) {
 			{Type: ai.EventDone, StopReason: ai.StopReasonStop},
 		}},
 	)
-	screenshot := agent.NewTool(agent.ToolSpec{Name: "screenshot"}, func(context.Context, ai.ToolCall) (agent.ToolResult, error) {
+	screenshot := agent.NewTool(agent.ToolSpec{Name: "screenshot"}, func(context.Context, string, json.RawMessage) (agent.ToolResult, error) {
 		return agent.ToolResult{Content: []ai.ContentBlock{
 			{Type: ai.BlockText, Text: "preview"},
 			{Type: ai.BlockImage, Image: &ai.ImageContent{Data: "aGVsbG8=", MimeType: "image/png"}},
@@ -1354,7 +1358,7 @@ func TestToolResultImagesAndInvalidContent(t *testing.T) {
 		t.Fatalf("tool message = %+v", toolMessage)
 	}
 
-	invalid := agent.NewTool(agent.ToolSpec{Name: "screenshot"}, func(context.Context, ai.ToolCall) (agent.ToolResult, error) {
+	invalid := agent.NewTool(agent.ToolSpec{Name: "screenshot"}, func(context.Context, string, json.RawMessage) (agent.ToolResult, error) {
 		return agent.ToolResult{Content: []ai.ContentBlock{{
 			Type: ai.BlockImage,
 			Image: &ai.ImageContent{
@@ -1406,7 +1410,7 @@ func TestStreamedArgumentErrorIsObservation(t *testing.T) {
 		}},
 	)
 	executed := false
-	weather := agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(context.Context, ai.ToolCall) (string, error) {
+	weather := agent.NewTextTool(agent.ToolSpec{Name: "weather"}, func(context.Context, string, json.RawMessage) (string, error) {
 		executed = true
 		return "sunny", nil
 	})

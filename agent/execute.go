@@ -269,13 +269,12 @@ func (a *Agent) executePreparedTool(ctx context.Context, prepared preparedToolCa
 		})
 	}
 
-	var result ToolResult
-	var err error
-	if streaming, ok := prepared.tool.(StreamingTool); ok {
-		result, err = streaming.ExecuteStream(ctx, prepared.call, update)
-	} else {
-		result, err = prepared.tool.Execute(ctx, prepared.call)
-	}
+	result, err := prepared.tool.Execute(
+		ctx,
+		prepared.call.ID,
+		ai.CloneRawMessage(prepared.call.Arguments),
+		update,
+	)
 	executed.durationMs = time.Since(started).Milliseconds()
 	closeUpdates()
 	if err != nil {

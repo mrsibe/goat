@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"github.com/mrsibe/goat/agent"
-	"github.com/mrsibe/goat/ai"
 )
 
 var weatherTool = agent.NewTextTool(agent.ToolSpec{
@@ -23,11 +22,11 @@ var weatherTool = agent.NewTextTool(agent.ToolSpec{
 		},
 		"required": []string{"city"},
 	},
-}, func(_ context.Context, call ai.ToolCall) (string, error) {
+}, func(_ context.Context, _ string, args json.RawMessage) (string, error) {
 	var input struct {
 		City string `json:"city"`
 	}
-	if err := json.Unmarshal(call.Arguments, &input); err != nil {
+	if err := json.Unmarshal(args, &input); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 	if input.City == "" {

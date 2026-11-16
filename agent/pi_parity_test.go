@@ -64,7 +64,7 @@ func TestPiParityToolEndCompletionOrder(t *testing.T) {
 	)
 	slowStarted := make(chan struct{})
 	fastDone := make(chan struct{})
-	slow := agent.NewTextTool(agent.ToolSpec{Name: "slow"}, func(ctx context.Context, _ ai.ToolCall) (string, error) {
+	slow := agent.NewTextTool(agent.ToolSpec{Name: "slow"}, func(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
 		close(slowStarted)
 		select {
 		case <-fastDone:
@@ -73,7 +73,7 @@ func TestPiParityToolEndCompletionOrder(t *testing.T) {
 			return "", ctx.Err()
 		}
 	})
-	fast := agent.NewTextTool(agent.ToolSpec{Name: "fast"}, func(ctx context.Context, _ ai.ToolCall) (string, error) {
+	fast := agent.NewTextTool(agent.ToolSpec{Name: "fast"}, func(ctx context.Context, _ string, _ json.RawMessage) (string, error) {
 		select {
 		case <-slowStarted:
 			close(fastDone)
@@ -128,21 +128,21 @@ func TestPiParitySteeringInjectedAfterToolBatch(t *testing.T) {
 	)
 	var mu sync.Mutex
 	var executed []string
-	echo := agent.NewTool(agent.ToolSpec{Name: "echo"}, func(_ context.Context, call ai.ToolCall) (agent.ToolResult, error) {
-		var args struct {
+	echo := agent.NewTool(agent.ToolSpec{Name: "echo"}, func(_ context.Context, _ string, raw json.RawMessage) (agent.ToolResult, error) {
+		var parsed struct {
 			Value string `json:"value"`
 		}
-		if err := json.Unmarshal(call.Arguments, &args); err != nil {
+		if err := json.Unmarshal(raw, &parsed); err != nil {
 			return agent.ToolResult{}, err
 		}
 		mu.Lock()
-		executed = append(executed, args.Value)
+		executed = append(executed, parsed.Value)
 		first := len(executed) == 1
 		mu.Unlock()
 		if first {
 			a.Steer(ai.TextMessage(ai.RoleUser, "interrupt"))
 		}
-		return agent.TextResult("ok:" + args.Value), nil
+		return agent.TextResult("ok:" + parsed.Value), nil
 	})
 	a = newAgent(t, agent.Config{
 		Model:         model,
@@ -197,10 +197,10 @@ func TestPiParityAbortMidBatchSequential(t *testing.T) {
 		piParityToolCall(0, "call_1", "first", `{}`),
 		piParityToolCall(1, "call_2", "second", `{}`),
 	))
-	first := agent.NewTextTool(agent.ToolSpec{Name: "first"}, func(context.Context, ai.ToolCall) (string, error) {
+	first := agent.NewTextTool(agent.ToolSpec{Name: "first"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "first", nil
 	})
-	second := agent.NewTextTool(agent.ToolSpec{Name: "second"}, func(context.Context, ai.ToolCall) (string, error) {
+	second := agent.NewTextTool(agent.ToolSpec{Name: "second"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "second", nil
 	})
 	a = newAgent(t, agent.Config{
@@ -236,10 +236,10 @@ func TestPiParityAbortWhilePreparingParallelBatch(t *testing.T) {
 		piParityToolCall(0, "call_1", "first", `{}`),
 		piParityToolCall(1, "call_2", "second", `{}`),
 	))
-	first := agent.NewTextTool(agent.ToolSpec{Name: "first"}, func(context.Context, ai.ToolCall) (string, error) {
+	first := agent.NewTextTool(agent.ToolSpec{Name: "first"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "first", nil
 	})
-	second := agent.NewTextTool(agent.ToolSpec{Name: "second"}, func(context.Context, ai.ToolCall) (string, error) {
+	second := agent.NewTextTool(agent.ToolSpec{Name: "second"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "second", nil
 	})
 	a = newAgent(t, agent.Config{
@@ -295,8 +295,8 @@ func TestPiParityPrepareArgumentsBeforeValidation(t *testing.T) {
 		PrepareArguments: func(json.RawMessage) (json.RawMessage, error) {
 			return json.RawMessage(`{"edits":[{"oldText":"before","newText":"after"}]}`), nil
 		},
-	}, func(_ context.Context, call ai.ToolCall) (string, error) {
-		seen = append(seen, string(call.Arguments))
+	}, func(_ context.Context, _ string, args json.RawMessage) (string, error) {
+		seen = append(seen, string(args))
 		return "edited", nil
 	})
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{edit}})
@@ -350,7 +350,7 @@ func TestPiParityPrepareNextTurnPicksUpSteering(t *testing.T) {
 		piParityToolTurn(piParityToolCall(0, "call_1", "echo", `{}`)),
 		piParityTextTurn("done"),
 	)
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
 	a = newAgent(t, agent.Config{
@@ -444,7 +444,7 @@ func TestPiParityNaturalToolResultSatisfiesContinuation(t *testing.T) {
 		piParityToolTurn(piParityToolCall(0, "call_1", "noop", `{}`)),
 		piParityTextTurn("done"),
 	)
-	noop := agent.NewTextTool(agent.ToolSpec{Name: "noop"}, func(context.Context, ai.ToolCall) (string, error) {
+	noop := agent.NewTextTool(agent.ToolSpec{Name: "noop"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "done", nil
 	})
 	finishCalls := 0
@@ -503,7 +503,7 @@ func TestPiParityResetAndPromptWhileBusy(t *testing.T) {
 		piParityTextTurn("done"),
 	)
 	var a *agent.Agent
-	block := agent.NewTextTool(agent.ToolSpec{Name: "block"}, func(context.Context, ai.ToolCall) (string, error) {
+	block := agent.NewTextTool(agent.ToolSpec{Name: "block"}, func(context.Context, string, json.RawMessage) (string, error) {
 		a.Steer(ai.TextMessage(ai.RoleUser, "queued"))
 		once.Do(func() { close(started) })
 		<-release
@@ -553,7 +553,7 @@ func TestPiParityToolDurationOnEventAndMessage(t *testing.T) {
 		piParityToolTurn(piParityToolCall(0, "call_1", "echo", `{}`)),
 		piParityTextTurn("done"),
 	)
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		time.Sleep(time.Millisecond)
 		return "ok", nil
 	})
@@ -641,10 +641,10 @@ func findToolMessage(messages []ai.Message, id string) *ai.ToolResultMessage {
 // pi: "declares tool loadout changes to the model before the next request"
 func TestPiParityDeclaresToolLoadoutChanges(t *testing.T) {
 	model := faux.New(piParityTextTurn("first"), piParityTextTurn("second"))
-	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo", Description: "echo"}, func(context.Context, ai.ToolCall) (string, error) {
+	echo := agent.NewTextTool(agent.ToolSpec{Name: "echo", Description: "echo"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
-	read := agent.NewTextTool(agent.ToolSpec{Name: "read", Description: "read"}, func(context.Context, ai.ToolCall) (string, error) {
+	read := agent.NewTextTool(agent.ToolSpec{Name: "read", Description: "read"}, func(context.Context, string, json.RawMessage) (string, error) {
 		return "ok", nil
 	})
 	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{echo}})
