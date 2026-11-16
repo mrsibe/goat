@@ -803,9 +803,13 @@ func (a *Agent) runLoop(
 			}
 			requestMessages = ai.CloneMessages(transformed)
 		}
-		specs, err := toolSpecs(requestContext.Tools)
-		if err != nil {
-			return fail(err, !assistantEmitted)
+		specs := ai.GetCurrentTools(requestMessages)
+		if len(specs) == 0 {
+			generated, err := toolSpecs(requestContext.Tools)
+			if err != nil {
+				return fail(err, !assistantEmitted)
+			}
+			specs = generated
 		}
 
 		result.Steps++
@@ -879,6 +883,7 @@ func (a *Agent) runLoop(
 		}
 		decision := TurnDefault
 		if a.finishTurn != nil {
+			var err error
 			decision, err = a.finishTurn(ctx, cloneTurnContext(turn))
 			if err != nil {
 				a.emit(Event{

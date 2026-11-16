@@ -89,11 +89,29 @@ type Message interface {
 // declarations. Later system messages add instructions, replace or remove named
 // sections, and add or remove tools.
 type SystemMessage struct {
-	Content      string             `json:"content,omitempty"`
-	Sections     map[string]*string `json:"sections,omitempty"`
-	ToolsAdded   []ToolSpec         `json:"toolsAdded,omitempty"`
-	ToolsRemoved []ToolReference    `json:"toolsRemoved,omitempty"`
-	At           int64              `json:"timestamp,omitempty"`
+	Content  string             `json:"content,omitempty"`
+	Sections map[string]*string `json:"sections,omitempty"`
+	// SectionOrder preserves insertion order, which Go maps cannot express.
+	SectionOrder []string        `json:"sectionOrder,omitempty"`
+	ToolsAdded   []ToolSpec      `json:"toolsAdded,omitempty"`
+	ToolsRemoved []ToolReference `json:"toolsRemoved,omitempty"`
+	At           int64           `json:"timestamp,omitempty"`
+}
+
+// SetSection sets or removes a named section, preserving insertion order.
+func (m *SystemMessage) SetSection(name string, value *string) {
+	if m.Sections == nil {
+		m.Sections = make(map[string]*string)
+	}
+	if _, exists := m.Sections[name]; !exists {
+		m.SectionOrder = append(m.SectionOrder, name)
+	}
+	if value == nil {
+		delete(m.Sections, name)
+		m.SectionOrder = removeSectionName(m.SectionOrder, name)
+		return
+	}
+	m.Sections[name] = value
 }
 
 // UserMessage is a user turn.
@@ -426,6 +444,7 @@ func CloneMessage(message Message) Message {
 		cloned := *typed
 		cloned.ToolsAdded = cloneToolSpecs(typed.ToolsAdded)
 		cloned.ToolsRemoved = append([]ToolReference(nil), typed.ToolsRemoved...)
+		cloned.SectionOrder = append([]string(nil), typed.SectionOrder...)
 		if typed.Sections != nil {
 			cloned.Sections = make(map[string]*string, len(typed.Sections))
 			for name, value := range typed.Sections {

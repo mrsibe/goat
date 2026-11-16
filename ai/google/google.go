@@ -224,6 +224,7 @@ func (s *responseStream) Next() (ai.Event, error) {
 			s.done = true
 			return s.builder.Fail(normalizeError(s.info.Provider, err), ai.StopReasonError), nil
 		}
+		_ = ai.EmitProviderStreamEvent(s.ctx, chunk)
 		s.consume(chunk)
 	}
 }

@@ -130,3 +130,14 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+func TestRenderSystemMessagePreservesInsertionOrder(t *testing.T) {
+	system := &ai.SystemMessage{Content: "base"}
+	system.SetSection("b", strPtr("B"))
+	system.SetSection("a", strPtr("A"))
+	system.SetSection("b", nil)
+	system.SetSection("c", strPtr("C"))
+	if got, want := ai.RenderSystemMessage(*system), "base\n\nA\n\nC"; got != want {
+		t.Fatalf("render = %q, want %q", got, want)
+	}
+}

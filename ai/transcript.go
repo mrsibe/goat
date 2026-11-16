@@ -74,11 +74,14 @@ func GetCurrentSystemMessage(messages []Message) *SystemMessage {
 			}
 			for name, value := range system.Sections {
 				if value == nil {
-					delete(current.Sections, name)
+					if _, exists := current.Sections[name]; exists {
+						delete(current.Sections, name)
+						current.SectionOrder = removeSectionName(current.SectionOrder, name)
+					}
 					continue
 				}
 				copied := *value
-				current.Sections[name] = &copied
+				current.SetSection(name, &copied)
 			}
 		}
 		if len(system.ToolsAdded) > 0 {
@@ -109,21 +112,34 @@ func GetCurrentSystemPrompt(messages []Message) string {
 func RenderSystemMessage(system SystemMessage) string {
 	var text strings.Builder
 	text.WriteString(system.Content)
-	if len(system.Sections) > 0 {
-		names := make([]string, 0, len(system.Sections))
-		for name := range system.Sections {
-			names = append(names, name)
+	seen := make(map[string]bool, len(system.Sections))
+	appendSection := func(name string) {
+		if seen[name] {
+			return
 		}
-		sort.Strings(names)
-		for _, name := range names {
-			value := system.Sections[name]
-			if value == nil {
-				continue
+		value := system.Sections[name]
+		if value == nil {
+			return
+		}
+		seen[name] = true
+		if text.Len() > 0 {
+			text.WriteString("\n\n")
+		}
+		text.WriteString(*value)
+	}
+	for _, name := range system.SectionOrder {
+		appendSection(name)
+	}
+	if len(seen) < len(system.Sections) {
+		remaining := make([]string, 0, len(system.Sections)-len(seen))
+		for name := range system.Sections {
+			if !seen[name] {
+				remaining = append(remaining, name)
 			}
-			if text.Len() > 0 {
-				text.WriteString("\n\n")
-			}
-			text.WriteString(*value)
+		}
+		sort.Strings(remaining)
+		for _, name := range remaining {
+			appendSection(name)
 		}
 	}
 	return text.String()
@@ -217,6 +233,15 @@ func mergeToolSpecs(base, added []ToolSpec) []ToolSpec {
 		}
 	}
 	return merged
+}
+
+func removeSectionName(order []string, name string) []string {
+	for i, existing := range order {
+		if existing == name {
+			return append(order[:i], order[i+1:]...)
+		}
+	}
+	return order
 }
 
 func removeToolSpecs(base []ToolSpec, removed []ToolReference) []ToolSpec {
