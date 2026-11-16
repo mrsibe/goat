@@ -1,9 +1,10 @@
 # Changelog
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 和
-[语义化版本](https://semver.org/lang/zh-CN/)。v1.0 起稳定 API 遵循语义化版本。
+[语义化版本](https://semver.org/lang/zh-CN/)。0.x 阶段允许在 minor 版本做破坏性变更，
+1.0 起才严格遵循语义化版本。
 
-## [1.0.0] - 2026-11-15
+## [0.6.0] - 2026-11-16
 
 ### Changed
 
@@ -58,7 +59,6 @@
 - Agent 在工具集变化时插入声明用的 system message，并在 assistant 消息上记录
   本轮请求的 thinking level。
 - `ai.UnmarshalMessage` / `ai.UnmarshalMessages` 与各消息类型的 `MarshalJSON`。
-
 - `agent/pi_parity_test.go`：pi-agent-core 行为一致性基线，覆盖工具完成序与落库序、steering 注入时机、批次中途 abort 的结果补齐、`PrepareArguments`、`PrepareRequest`/`PrepareNextTurn`/`FinishTurn` 时序、continuation 请求次数、busy 语义与工具耗时一致性。
 
 ### Fixed

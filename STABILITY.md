@@ -1,10 +1,11 @@
 # API Stability
 
-GOAT v1.0 is the first stable release line. The exported API of the packages
-below follows semantic versioning; breaking changes require a major version and
-must be documented in `CHANGELOG.md`.
+GOAT is on the 0.x line (currently 0.6). Exported APIs are stable enough to
+build on, but a minor release may still make breaking changes. Strict semantic
+versioning starts at 1.0. Every breaking change must be documented in
+`CHANGELOG.md` and marked **破坏性**.
 
-## Stable packages
+## Packages in the compatibility promise
 
 - `github.com/mrsibe/goat/ai`
 - `github.com/mrsibe/goat/agent`
@@ -19,20 +20,24 @@ must be documented in `CHANGELOG.md`.
 ## Test-only packages
 
 - `github.com/mrsibe/goat/ai/faux` is a deterministic test model. Its exported
-  API is not covered by the v1.0 compatibility promise.
+  API is not covered by the compatibility promise.
 
 ## Policy
 
-- Exported identifiers in stable packages follow semantic versioning.
-- Breaking changes require a major version after v1.0.
-- Additive changes are allowed in minor versions.
+- 0.x: breaking changes are allowed in a minor release and must be marked
+  **破坏性** in `CHANGELOG.md`.
+- Every exported API change must update the snapshot under `testdata/api`
+  (`bash scripts/api-snapshot.sh -update`).
 - Deprecated identifiers remain for at least one minor release and carry a
   `Deprecated:` comment.
 - Internal packages and unexported behavior are not part of the public contract.
 
-## v1.0 freeze criteria (met)
+## v1.0 freeze criteria (not yet met)
 
-- The `agent` conformance suite and the pi parity matrix pass.
-- Provider contract tests pass for every built-in adapter.
-- The exported API snapshot is reviewed and committed (`testdata/api`).
-- `COMPATIBILITY.md` documents every intentional deviation from pi.
+- ✅ The `agent` conformance suite passes and the pi parity matrix has no
+  outstanding 🚧 entries.
+- ✅ Provider contract tests pass for every built-in adapter.
+- ✅ The exported API snapshot is reviewed and committed (`testdata/api`).
+- ✅ `COMPATIBILITY.md` documents every intentional deviation from pi.
+- ⬜ Simplification pass: the package layout and duplicated code paths are
+  collapsed before the API is frozen.
