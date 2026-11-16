@@ -54,8 +54,25 @@ conventions.
 - **Session persistence**: `Config.SessionID` is forwarded to provider cache
   hints. Durable conversation storage is a `goding` concern, not a core feature.
 - **Reset baseline**: GOAT restores the configured initial system prompt. Pi
-  retains the current system message. Dynamic tool declarations are not part of
-  GOAT's agent state model.
+  retains the current system message.
+- **Tool declarations**: transcript system messages carry `sections`,
+  `toolsAdded`, and `toolsRemoved` like pi, and the agent derives each request's
+  tool set from `GetCurrentTools`. The initial tool set is treated as an
+  implicit declaration, so only changes are written back as a system message.
+  Provider adapters still receive the executable set on `Request.Tools`; they do
+  not parse `toolsAdded`/`toolsRemoved` themselves.
+- **Sections order**: `SystemMessage.SectionOrder` records insertion order,
+  because Go maps are unordered. Pi relies on JSON object order.
+- **Subscriber signal**: `Agent.Subscribe` passes the run's `context.Context`
+  (pi passes an `AbortSignal`).
+- **API keys**: `Config.GetAPIKey` resolves a credential before every request;
+  per-request `RequestOptions.APIKey` overrides it.
+- **Cost**: `ai.Usage.Cost` is only populated when a caller applies
+  `ModelPricing`; GOAT ships no model catalog or price table.
+- **Message shape**: `ai.Message` is a closed role-specific union
+  (`SystemMessage`, `UserMessage`, `AssistantMessage`, `ToolResultMessage`).
+  Accessors are `Role()`, `Text()`, `Thinking()`, `ToolCalls()`,
+  `Timestamp()`; the timestamp field is `At` so the method can keep pi's name.
 
 ## Conformance
 

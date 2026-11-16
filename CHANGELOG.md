@@ -1,9 +1,75 @@
 # Changelog
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 和
-[语义化版本](https://semver.org/lang/zh-CN/)。v0.x 阶段允许破坏性变更。
+[语义化版本](https://semver.org/lang/zh-CN/)。v1.0 起稳定 API 遵循语义化版本。
 
-## [Unreleased]
+## [1.0.0] - 2026-11-15
+
+### Changed
+
+- **破坏性**：`ai.Message` 改为 role-specific 闭合接口，由 `*ai.SystemMessage`、
+  `*ai.UserMessage`、`*ai.AssistantMessage`、`*ai.ToolResultMessage` 实现。
+  `Role` 字段改为 `Role()` 方法，`Timestamp` 字段改为 `At` + `Timestamp()`，
+  `ai.ToolResultMessage(...)` 构造函数改名为 `ai.NewToolResultMessage(...)`。
+- **破坏性**：`StopReason` 取值对齐 pi：`toolUse`、`pending`、`deferred`；
+  `StopReasonToolCalls` 保留为 `StopReasonToolUse` 的别名。
+- **破坏性**：`RoleTool` 的取值改为 `"toolResult"`，并新增 `RoleToolResult`。
+- **破坏性**：`ai.Usage` 字段对齐 pi（`Input`、`Output`、`CacheRead`、
+  `CacheWrite`、`CacheWrite1H`、`Reasoning`、`TotalTokens`、`Cost`）。
+- **破坏性**：`ai.Event.Message`/`Partial` 与 `agent.Event.Message` 从
+  `*ai.Message` 改为 `ai.Message`；`agent.ThinkingLevel` 改为 `ai.ThinkingLevel`
+  的别名。
+
+### Added
+
+- `agent.Tool.Execute` 对齐 pi：`(ctx, callID, args, onUpdate)`；`NewTool` /
+  `NewTextTool` 接收 `(ctx, callID, args)`，`NewStreamingTool` 接收 `onUpdate`；
+  删除独立的 `StreamingTool` 接口。`ToolSpec` 增加 `Replay`。
+- `agent.Config.TransformContext` 与 `ConvertToLLM`：请求前先改写 transcript，
+  再转换为 provider 消息。
+- `Agent.Done()`、`SetSteeringMode`、`SetFollowUpMode`。
+- `agent.RunToolCall` 与 `ToolCallOutcome`：不产生事件地执行单个工具调用，
+  复用参数准备、校验、before/after 钩子。
+- 工具事件重命名为 pi 的 `tool_execution_start/update/end`，旧常量保留为别名。
+- `ai.RequestOptions` 增加请求级钩子与标识：`APIKey`、`OnPayload`、`OnResponse`、
+  `OnProviderStreamEvent`、`Identity`、`Transport`、`TimeoutMs`、`MaxRetries`、
+  `MaxRetryDelayMs`、`SamplingParams`。`OnPayload` 与 `SamplingParams` 在 HTTP
+  传输层改写请求体；`OnResponse` 观测原始响应；`Identity` 设置 `User-Agent`
+  与 OpenRouter 归因头；`websocket` transport 会被拒绝。
+- 工具可以通过 `agent.RunToolCall` 调用其它工具，调用记录会写入
+  `ToolResult.NestedCalls` 与 tool-result 消息的 `nestedCalls`。
+- `ai.ModelInfo` 增加 `Reasoning`、`ThinkingLevels`、`Pricing`；
+  `ai.ModelPricing` 提供 `Calculate`/`ApplyCost`，`ModelInfo` 提供
+  `SupportsThinkingLevel`/`ClampThinkingLevel`。OpenAI/Anthropic/Google 的
+  `Config` 可直接设置这些元数据。
+- `agent.Config.GetAPIKey`：每次请求前解析 provider 凭据。
+- `Agent.Subscribe` 的回调改为 `func(Event, context.Context)`，可拿到当前 run
+  的取消信号。
+- `SystemMessage.SectionOrder` 与 `SetSection`，保证 sections 按插入顺序渲染。
+- provider 从 transcript 的 `GetCurrentTools` 派生本次请求的工具集（transcript
+  没有声明时回退到 registry）。
+- `ai.Context`、`ai.TranscriptContext` 和 `ai.NormalizeContext`；system message
+  增加 `Sections`、`ToolsAdded`、`ToolsRemoved`，并新增
+  `GetCurrentSystemMessage`、`GetCurrentSystemPrompt`、`GetCurrentTools`、
+  `GetToolStateChanges`。
+- Assistant 消息增加 `ThinkingLevel`、`ProviderThinkingLevel`、`Diagnostics`、
+  `Deferred`、`RawStopReason`、`EndTurn`；`Usage` 增加 `Cost`；tool result 增加
+  `NestedCalls`。
+- Agent 在工具集变化时插入声明用的 system message，并在 assistant 消息上记录
+  本轮请求的 thinking level。
+- `ai.UnmarshalMessage` / `ai.UnmarshalMessages` 与各消息类型的 `MarshalJSON`。
+
+- `agent/pi_parity_test.go`：pi-agent-core 行为一致性基线，覆盖工具完成序与落库序、steering 注入时机、批次中途 abort 的结果补齐、`PrepareArguments`、`PrepareRequest`/`PrepareNextTurn`/`FinishTurn` 时序、continuation 请求次数、busy 语义与工具耗时一致性。
+
+### Fixed
+
+- 并行工具批次：`tool_execution_end` 在每个调用完成时立即发出，不再等最慢的
+  调用结束才一次性发出；被 block 或未知工具的结束事件也在预检阶段立即发出。
+- 串行工具批次被 abort 后，剩余调用仍各自得到一条 `Operation aborted` 的
+  tool result，不再留下 "assistant 带 toolCall、transcript 缺 toolResult" 的非法历史。
+  abort 后跳过参数准备与 `BeforeToolCall`，与 pi 一致。
+- `BeforeToolCall` 对已解析参数的修改现在会传递给 `Tool.Execute`（pi 语义：
+  不再重复校验）。`tool_execution_*` 事件与 `AfterToolCall` 仍使用调用原始参数。
 
 ## [0.5.0] - 2026-11-12
 

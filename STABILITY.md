@@ -1,15 +1,20 @@
 # API Stability
 
-GOAT is pre-1.0. The v0.4.x release line is the final planned stabilization pass
-before v1.0; breaking changes remain possible until v1.0 and must be documented
-in `CHANGELOG.md`.
+GOAT v1.0 is the first stable release line. The exported API of the packages
+below follows semantic versioning; breaking changes require a major version and
+must be documented in `CHANGELOG.md`.
 
-## Stable packages after v1.0
+## Stable packages
 
 - `github.com/mrsibe/goat/ai`
 - `github.com/mrsibe/goat/agent`
 - `github.com/mrsibe/goat/ai/openai`
 - `github.com/mrsibe/goat/ai/anthropic`
+- `github.com/mrsibe/goat/ai/azure`
+- `github.com/mrsibe/goat/ai/google`
+- `github.com/mrsibe/goat/ai/openrouter`
+- `github.com/mrsibe/goat/ai/deepseek`
+- `github.com/mrsibe/goat/ai/xai`
 
 ## Test-only packages
 
@@ -25,9 +30,9 @@ in `CHANGELOG.md`.
   `Deprecated:` comment.
 - Internal packages and unexported behavior are not part of the public contract.
 
-## v1.0 freeze criteria
+## v1.0 freeze criteria (met)
 
-- The `agent` conformance suite passes.
+- The `agent` conformance suite and the pi parity matrix pass.
 - Provider contract tests pass for every built-in adapter.
-- The exported API snapshot is reviewed and committed.
+- The exported API snapshot is reviewed and committed (`testdata/api`).
 - `COMPATIBILITY.md` documents every intentional deviation from pi.

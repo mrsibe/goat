@@ -13,7 +13,7 @@ Agent 代码接入 OpenAI、Anthropic、Azure OpenAI、Google Gemini 或自定�
 GOAT 只做核心运行时。编码工具、文件/命令沙箱、会话持久化、MCP、TUI 和 CLI 属于
 产品层，放在独立仓库 [`goding`](https://github.com/mrsibe/goding)。
 
-> 当前版本：**v0.5.0**。v0.x 阶段允许破坏性变更，升级前请阅读
+> 当前版本：**v1.0.0**。v1.0 起导出的稳定 API 遵循语义化版本，升级前请阅读
 > [CHANGELOG.md](CHANGELOG.md)。v1.0 之后的兼容承诺见
 > [STABILITY.md](STABILITY.md)，与 pi 的有意差异见
 > [COMPATIBILITY.md](COMPATIBILITY.md)。
@@ -56,7 +56,7 @@ GOAT 只做核心运行时。编码工具、文件/命令沙箱、会话持久�
 ## 安装
 
 ```bash
-go get github.com/mrsibe/goat@v0.5.0
+go get github.com/mrsibe/goat@v1.0.0
 ```
 
 需要 Go 1.27.1 或更高版本。
@@ -608,7 +608,7 @@ GOAT 的目标是把 pi 的核心 Agent 能力带到 Go，而不是复刻 pi cod
 
 ## 版本与稳定性
 
-当前版本是 **v0.5.0**。v0.x 阶段允许破坏性 API，完整迁移说明见
+当前版本是 **v1.0.0**。v1.0 起稳定 API 遵循语义化版本，完整迁移说明见
 [CHANGELOG.md](CHANGELOG.md)。
 
 v1.0 的冻结范围、兼容承诺和弃用流程见 [STABILITY.md](STABILITY.md)。
@@ -645,16 +645,16 @@ API 后，运行 `bash scripts/api-snapshot.sh -update` 并审查差异。
 验证，再用 GitHub CLI 创建 Release：
 
 ```bash
-git tag -a v0.5.0 -m "GOAT v0.5.0"
+git tag -a v1.0.0 -m "GOAT v1.0.0"
 git push origin main
-git push origin v0.5.0
+git push origin v1.0.0
 ```
 
 验证发布状态：
 
 ```bash
 gh run list --workflow release.yml
-gh release view v0.5.0
+gh release view v1.0.0
 ```
 
 ## License
