@@ -1156,3 +1156,156 @@ func TestPiParityBeforeToolCallArgsMutationReachesTool(t *testing.T) {
 		}
 	}
 }
+
+// piParityRunTerminateBatch runs a two-call tool turn and returns the number of
+// model requests (steps) the run made.
+func piParityRunTerminateBatch(
+	t *testing.T,
+	mode agent.ToolExecutionMode,
+	terminateFirst bool,
+	terminateSecond bool,
+) int {
+	t.Helper()
+	model := faux.New(
+		piParityToolTurn(
+			piParityToolCall(0, "call_1", "one", `{}`),
+			piParityToolCall(1, "call_2", "two", `{}`),
+		),
+		piParityTextTurn("done"),
+	)
+	tool := func(name string, terminate bool) agent.Tool {
+		return agent.NewTool(agent.ToolSpec{Name: name}, func(context.Context, string, json.RawMessage) (agent.ToolResult, error) {
+			result := agent.TextResult(name + " result")
+			result.Terminate = terminate
+			return result, nil
+		})
+	}
+	a := newAgent(t, agent.Config{
+		Model:         model,
+		Tools:         []agent.Tool{tool("one", terminateFirst), tool("two", terminateSecond)},
+		ToolExecution: mode,
+	})
+	result, err := a.Prompt(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result.Steps
+}
+
+// pi: "terminates the batch only when every finalized tool result terminates"
+func TestPiParityToolBatchTerminateSemantics(t *testing.T) {
+	cases := []struct {
+		name          string
+		mode          agent.ToolExecutionMode
+		first, second bool
+		wantSteps     int
+	}{
+		{"parallel all terminate", agent.ToolExecutionParallel, true, true, 1},
+		{"parallel partial terminate", agent.ToolExecutionParallel, true, false, 2},
+		{"parallel mixed other order", agent.ToolExecutionParallel, false, true, 2},
+		{"sequential all terminate", agent.ToolExecutionSequential, true, true, 1},
+		{"sequential mixed", agent.ToolExecutionSequential, false, true, 2},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			steps := piParityRunTerminateBatch(t, testCase.mode, testCase.first, testCase.second)
+			if steps != testCase.wantSteps {
+				t.Fatalf("steps = %d, want %d", steps, testCase.wantSteps)
+			}
+		})
+	}
+}
+
+// pi: "a blocked tool call with terminate=true stops the batch"
+func TestPiParityBlockedToolTerminateStopsBatch(t *testing.T) {
+	model := faux.New(
+		piParityToolTurn(
+			piParityToolCall(0, "call_1", "one", `{}`),
+			piParityToolCall(1, "call_2", "two", `{}`),
+		),
+		piParityTextTurn("done"),
+	)
+	executed := 0
+	tool := func(name string) agent.Tool {
+		return agent.NewTool(agent.ToolSpec{Name: name}, func(context.Context, string, json.RawMessage) (agent.ToolResult, error) {
+			executed++
+			return agent.TextResult(name), nil
+		})
+	}
+	a := newAgent(t, agent.Config{
+		Model: model,
+		Tools: []agent.Tool{tool("one"), tool("two")},
+		BeforeToolCall: func(context.Context, agent.BeforeToolCallContext) (*agent.BeforeToolCallResult, error) {
+			return &agent.BeforeToolCallResult{Block: true, Reason: "blocked", Terminate: true}, nil
+		},
+	})
+	result, err := a.Prompt(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Steps != 1 {
+		t.Fatalf("terminating blocked batch should stop after one turn, steps = %d", result.Steps)
+	}
+	if executed != 0 {
+		t.Fatalf("blocked tools must not execute, ran %d", executed)
+	}
+}
+
+// pi: "afterToolCall can mark the batch terminating"
+func TestPiParityAfterToolCallCanTerminateBatch(t *testing.T) {
+	model := faux.New(
+		piParityToolTurn(
+			piParityToolCall(0, "call_1", "one", `{}`),
+			piParityToolCall(1, "call_2", "two", `{}`),
+		),
+		piParityTextTurn("done"),
+	)
+	tool := func(name string) agent.Tool {
+		return agent.NewTextTool(agent.ToolSpec{Name: name}, func(context.Context, string, json.RawMessage) (string, error) {
+			return name + " result", nil
+		})
+	}
+	a := newAgent(t, agent.Config{
+		Model: model,
+		Tools: []agent.Tool{tool("one"), tool("two")},
+		AfterToolCall: func(context.Context, agent.AfterToolCallContext) (*agent.AfterToolCallResult, error) {
+			return &agent.AfterToolCallResult{Terminate: boolPtr(true)}, nil
+		},
+	})
+	result, err := a.Prompt(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Steps != 1 {
+		t.Fatalf("afterToolCall terminate should stop after one turn, steps = %d", result.Steps)
+	}
+}
+
+// pi: "continue emits no user message events"
+func TestPiParityContinueEmitsNoUserMessageEvents(t *testing.T) {
+	model := faux.New(piParityTextTurn("done"))
+	a := newAgent(t, agent.Config{
+		Model: model,
+		Messages: []ai.Message{
+			ai.NewUserMessage(ai.ContentBlock{Type: ai.BlockText, Text: "first"}),
+			ai.NewToolResultMessage("call_1", "echo", []ai.ContentBlock{{Type: ai.BlockText, Text: "ok"}}, false),
+		},
+	})
+	log := subscribe(a)
+
+	result, err := a.Continue(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Steps != 1 {
+		t.Fatalf("steps = %d", result.Steps)
+	}
+	for _, event := range log.snapshot() {
+		if event.Type != agent.EventMessageStart && event.Type != agent.EventMessageEnd {
+			continue
+		}
+		if event.Message != nil && event.Message.Role() == ai.RoleUser {
+			t.Fatalf("continue emitted a user message event: %+v", event)
+		}
+	}
+}
