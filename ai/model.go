@@ -28,6 +28,81 @@ type ModelInfo struct {
 	SupportsImages           bool   `json:"supports_images,omitempty"`
 	SupportsToolResultImages bool   `json:"supports_tool_result_images,omitempty"`
 	SupportsThinking         bool   `json:"supports_thinking,omitempty"`
+	// Reasoning reports whether the model exposes a reasoning/thinking mode.
+	Reasoning bool `json:"reasoning,omitempty"`
+	// ThinkingLevels lists explicitly supported levels. Empty means off..high
+	// when Reasoning is true; xhigh and max always require an explicit entry.
+	ThinkingLevels []ThinkingLevel `json:"thinking_levels,omitempty"`
+	// Pricing is the per-million-token price used by Usage.ApplyCost.
+	Pricing ModelPricing `json:"pricing,omitempty"`
+}
+
+// ModelPricing is a per-million-token price table.
+type ModelPricing struct {
+	Input      float64 `json:"input,omitempty"`
+	Output     float64 `json:"output,omitempty"`
+	CacheRead  float64 `json:"cache_read,omitempty"`
+	CacheWrite float64 `json:"cache_write,omitempty"`
+}
+
+// Calculate returns the cost of one usage report at this price table. Anthropic
+// 1h cache writes are billed at twice the base input rate.
+func (p ModelPricing) Calculate(usage Usage) Cost {
+	longWrite := usage.CacheWrite1H
+	shortWrite := usage.CacheWrite - longWrite
+	cost := Cost{
+		Input:      (p.Input / 1_000_000) * float64(usage.Input),
+		Output:     (p.Output / 1_000_000) * float64(usage.Output),
+		CacheRead:  (p.CacheRead / 1_000_000) * float64(usage.CacheRead),
+		CacheWrite: (p.CacheWrite*float64(shortWrite) + p.Input*2*float64(longWrite)) / 1_000_000,
+	}
+	cost.Total = cost.Input + cost.Output + cost.CacheRead + cost.CacheWrite
+	return cost
+}
+
+// ApplyCost fills usage.Cost from the pricing table.
+func (p ModelPricing) ApplyCost(usage *Usage) {
+	if usage == nil {
+		return
+	}
+	usage.Cost = p.Calculate(*usage)
+}
+
+// SupportsThinkingLevel reports whether the model accepts the level.
+func (info ModelInfo) SupportsThinkingLevel(level ThinkingLevel) bool {
+	if !info.Reasoning && !info.SupportsThinking {
+		return level == ThinkingOff
+	}
+	if len(info.ThinkingLevels) > 0 {
+		for _, supported := range info.ThinkingLevels {
+			if supported == level {
+				return true
+			}
+		}
+		return false
+	}
+	return level != ThinkingXHigh && level != ThinkingMax
+}
+
+// ClampThinkingLevel returns the requested level when supported, otherwise the
+// closest supported lower level.
+func (info ModelInfo) ClampThinkingLevel(level ThinkingLevel) ThinkingLevel {
+	levels := []ThinkingLevel{
+		ThinkingOff, ThinkingMinimal, ThinkingLow, ThinkingMedium, ThinkingHigh, ThinkingXHigh, ThinkingMax,
+	}
+	index := 0
+	for i, candidate := range levels {
+		if candidate == level {
+			index = i
+			break
+		}
+	}
+	for i := index; i >= 0; i-- {
+		if info.SupportsThinkingLevel(levels[i]) {
+			return levels[i]
+		}
+	}
+	return ThinkingOff
 }
 
 // Model is the boundary between the agent loop and a model provider.

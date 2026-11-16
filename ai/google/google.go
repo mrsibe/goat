@@ -35,6 +35,9 @@ type Config struct {
 	MaxRetries      *int
 	ContextWindow   int
 	MaxOutputTokens int
+	Reasoning       bool
+	ThinkingLevels  []ai.ThinkingLevel
+	Pricing         ai.ModelPricing
 }
 
 // Provider implements ai.Model using Gemini streaming generation.

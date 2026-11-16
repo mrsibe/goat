@@ -48,6 +48,9 @@ type Config struct {
 	MaxRetries      *int
 	ContextWindow   int
 	MaxOutputTokens int
+	Reasoning       bool
+	ThinkingLevels  []ai.ThinkingLevel
+	Pricing         ai.ModelPricing
 }
 
 type providerCore struct {
@@ -107,6 +110,9 @@ func newProviderCore(config Config, api ai.API) (providerCore, error) {
 		ContextWindow:   config.ContextWindow,
 		MaxOutputTokens: config.MaxOutputTokens,
 		SupportsTools:   true,
+		Reasoning:       config.Reasoning,
+		ThinkingLevels:  config.ThinkingLevels,
+		Pricing:         config.Pricing,
 	}
 	switch api {
 	case ai.APIOpenAICompletions:
