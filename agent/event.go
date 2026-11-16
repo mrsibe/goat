@@ -40,21 +40,27 @@ const (
 type EventType string
 
 const (
-	EventAgentStart    EventType = "agent_start"
-	EventTurnStart     EventType = "turn_start"
-	EventMessageStart  EventType = "message_start"
-	EventMessageUpdate EventType = "message_update"
-	EventMessageDelta  EventType = "message_delta"
-	EventMessageEnd    EventType = "message_end"
-	EventThinkingStart EventType = "thinking_start"
-	EventThinkingDelta EventType = "thinking_delta"
-	EventThinkingEnd   EventType = "thinking_end"
-	EventToolStart     EventType = "tool_start"
-	EventToolUpdate    EventType = "tool_update"
-	EventToolEnd       EventType = "tool_end"
-	EventTurnEnd       EventType = "turn_end"
-	EventAgentEnd      EventType = "agent_end"
-	EventAgentError    EventType = "agent_error"
+	EventAgentStart          EventType = "agent_start"
+	EventTurnStart           EventType = "turn_start"
+	EventMessageStart        EventType = "message_start"
+	EventMessageUpdate       EventType = "message_update"
+	EventMessageDelta        EventType = "message_delta"
+	EventMessageEnd          EventType = "message_end"
+	EventThinkingStart       EventType = "thinking_start"
+	EventThinkingDelta       EventType = "thinking_delta"
+	EventThinkingEnd         EventType = "thinking_end"
+	EventToolExecutionStart  EventType = "tool_execution_start"
+	EventToolExecutionUpdate EventType = "tool_execution_update"
+	EventToolExecutionEnd    EventType = "tool_execution_end"
+	// Deprecated: use EventToolExecutionStart.
+	EventToolStart = EventToolExecutionStart
+	// Deprecated: use EventToolExecutionUpdate.
+	EventToolUpdate = EventToolExecutionUpdate
+	// Deprecated: use EventToolExecutionEnd.
+	EventToolEnd              = EventToolExecutionEnd
+	EventTurnEnd    EventType = "turn_end"
+	EventAgentEnd   EventType = "agent_end"
+	EventAgentError EventType = "agent_error"
 )
 
 // Event is delivered synchronously while an agent run is in progress.

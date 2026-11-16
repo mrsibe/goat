@@ -68,11 +68,16 @@ type Config struct {
 	ThinkingLevel     ThinkingLevel
 	ThinkingBudgets   map[ThinkingLevel]int
 	TransformMessages MessageTransformer
-	BeforeToolCall    BeforeToolCall
-	AfterToolCall     AfterToolCall
-	PrepareRequest    PrepareRequest
-	PrepareNextTurn   PrepareNextTurn
-	FinishTurn        FinishTurn
+	// TransformContext rewrites the transcript before ConvertToLLM, matching
+	// pi's AgentMessage-level context transform.
+	TransformContext func(context.Context, []ai.Message) ([]ai.Message, error)
+	// ConvertToLLM maps the transcript to provider messages before each request.
+	ConvertToLLM    func([]ai.Message) []ai.Message
+	BeforeToolCall  BeforeToolCall
+	AfterToolCall   AfterToolCall
+	PrepareRequest  PrepareRequest
+	PrepareNextTurn PrepareNextTurn
+	FinishTurn      FinishTurn
 }
 
 // Agent owns a mutable transcript, tool set, model, and pending input queues.
@@ -94,6 +99,8 @@ type Agent struct {
 	steeringQueue     []ai.Message
 	followUpQueue     []ai.Message
 	transformMessages MessageTransformer
+	transformContext  func(context.Context, []ai.Message) ([]ai.Message, error)
+	convertToLLM      func([]ai.Message) []ai.Message
 	beforeToolCall    BeforeToolCall
 	afterToolCall     AfterToolCall
 	prepareRequest    PrepareRequest
@@ -115,6 +122,7 @@ type Agent struct {
 
 type activeRun struct {
 	cancel context.CancelFunc
+	ctx    context.Context
 	done   chan struct{}
 }
 
@@ -197,6 +205,8 @@ func New(config Config) (*Agent, error) {
 		steeringMode:      steeringMode,
 		followUpMode:      followUpMode,
 		transformMessages: config.TransformMessages,
+		transformContext:  config.TransformContext,
+		convertToLLM:      config.ConvertToLLM,
 		beforeToolCall:    config.BeforeToolCall,
 		afterToolCall:     config.AfterToolCall,
 		prepareRequest:    config.PrepareRequest,
@@ -321,7 +331,7 @@ func (a *Agent) runMessages(
 		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	active := &activeRun{cancel: cancel, done: make(chan struct{})}
+	active := &activeRun{cancel: cancel, ctx: runCtx, done: make(chan struct{})}
 	a.active = active
 	a.isStreaming = true
 	a.streamingMessage = nil
@@ -366,6 +376,39 @@ func (a *Agent) WaitForIdle(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Done returns a channel that is closed when the active run finishes. It
+// returns nil when no run is active.
+func (a *Agent) Done() <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active == nil {
+		return nil
+	}
+	return a.active.ctx.Done()
+}
+
+// SetSteeringMode changes how queued steering messages are drained.
+func (a *Agent) SetSteeringMode(mode QueueMode) error {
+	if mode != QueueAll && mode != QueueOneAtATime {
+		return fmt.Errorf("agent: unsupported steering mode %q", mode)
+	}
+	a.mu.Lock()
+	a.steeringMode = mode
+	a.mu.Unlock()
+	return nil
+}
+
+// SetFollowUpMode changes how queued follow-up messages are drained.
+func (a *Agent) SetFollowUpMode(mode QueueMode) error {
+	if mode != QueueAll && mode != QueueOneAtATime {
+		return fmt.Errorf("agent: unsupported follow-up mode %q", mode)
+	}
+	a.mu.Lock()
+	a.followUpMode = mode
+	a.mu.Unlock()
+	return nil
 }
 
 // Reset clears the transcript and queues, restoring the initial system prompt.
@@ -743,6 +786,16 @@ func (a *Agent) runLoop(
 		currentContext = cloneAgentContext(requestContext)
 
 		requestMessages := ai.CloneMessages(requestContext.Messages)
+		if a.transformContext != nil {
+			transformed, err := a.transformContext(ctx, ai.CloneMessages(requestMessages))
+			if err != nil {
+				return fail(fmt.Errorf("agent: transform context: %w", err), !assistantEmitted)
+			}
+			requestMessages = ai.CloneMessages(transformed)
+		}
+		if a.convertToLLM != nil {
+			requestMessages = ai.CloneMessages(a.convertToLLM(ai.CloneMessages(requestMessages)))
+		}
 		if a.transformMessages != nil {
 			transformed, err := a.transformMessages(ctx, ai.CloneMessages(requestMessages))
 			if err != nil {

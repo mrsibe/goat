@@ -703,3 +703,158 @@ func TestPiParityAssistantRecordsThinkingLevel(t *testing.T) {
 		t.Fatalf("assistant = %+v", assistant)
 	}
 }
+
+// pi: "should apply transformContext before convertToLlm"
+func TestPiParityTransformContextBeforeConvertToLLM(t *testing.T) {
+	model := faux.New(piParityTextTurn("done"))
+	var order []string
+	a := newAgent(t, agent.Config{
+		Model: model,
+		TransformContext: func(_ context.Context, messages []ai.Message) ([]ai.Message, error) {
+			order = append(order, "transform")
+			return append(messages, ai.TextMessage(ai.RoleUser, "kept")), nil
+		},
+		ConvertToLLM: func(messages []ai.Message) []ai.Message {
+			order = append(order, "convert")
+			converted := make([]ai.Message, 0, len(messages))
+			for _, message := range messages {
+				if message.Text() == "drop" {
+					continue
+				}
+				converted = append(converted, message)
+			}
+			return converted
+		},
+	})
+	if _, err := a.Prompt(context.Background(), "drop"); err != nil {
+		t.Fatal(err)
+	}
+	if !equalStrings(order, []string{"transform", "convert"}) {
+		t.Fatalf("hook order = %v", order)
+	}
+	request := model.Requests[0].Messages
+	if containsText(request, "drop") || !containsText(request, "kept") {
+		t.Fatalf("request = %+v", request)
+	}
+}
+
+// pi: "runToolCall validates, runs the hooks, and reports failures as error outcomes"
+func TestPiParityRunToolCallHooks(t *testing.T) {
+	var beforeArgs any
+	var executedArgs string
+	echo := agent.NewTool(agent.ToolSpec{Name: "echo", Parameters: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"value": map[string]any{"type": "string"},
+		},
+		"required": []any{"value"},
+	}}, func(_ context.Context, callID string, args json.RawMessage) (agent.ToolResult, error) {
+		executedArgs = callID + ":" + string(args)
+		return agent.TextResult("ok"), nil
+	})
+
+	outcome := agent.RunToolCall(context.Background(), ai.ToolCall{
+		ID:        "call_1",
+		Name:      "echo",
+		Arguments: json.RawMessage(`{"value":"x"}`),
+	}, agent.RunToolCallOptions{
+		Tools: []agent.Tool{echo},
+		BeforeToolCall: func(_ context.Context, call agent.BeforeToolCallContext) (*agent.BeforeToolCallResult, error) {
+			beforeArgs = call.Args
+			return nil, nil
+		},
+		AfterToolCall: func(_ context.Context, call agent.AfterToolCallContext) (*agent.AfterToolCallResult, error) {
+			return &agent.AfterToolCallResult{
+				Content: []ai.ContentBlock{{Type: ai.BlockText, Text: "overridden"}},
+			}, nil
+		},
+	})
+	if outcome.IsError || !strings.Contains(outcome.Result.Text(), "overridden") {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if executedArgs != `call_1:{"value":"x"}` {
+		t.Fatalf("executed args = %q", executedArgs)
+	}
+	if args, ok := beforeArgs.(map[string]any); !ok || args["value"] != "x" {
+		t.Fatalf("before args = %+v", beforeArgs)
+	}
+
+	invalid := agent.RunToolCall(context.Background(), ai.ToolCall{
+		ID:        "call_2",
+		Name:      "echo",
+		Arguments: json.RawMessage(`{"value":1}`),
+	}, agent.RunToolCallOptions{Tools: []agent.Tool{echo}})
+	if !invalid.IsError || !strings.Contains(invalid.Result.Text(), "expected string") {
+		t.Fatalf("invalid outcome = %+v", invalid)
+	}
+
+	unknown := agent.RunToolCall(context.Background(), ai.ToolCall{ID: "call_3", Name: "missing"}, agent.RunToolCallOptions{Tools: []agent.Tool{echo}})
+	if !unknown.IsError || !strings.Contains(unknown.Result.Text(), "unknown tool") {
+		t.Fatalf("unknown outcome = %+v", unknown)
+	}
+}
+
+// pi: "should pass the active abort signal to subscribers" / Agent.signal
+func TestPiParityDoneSignalAndQueueModes(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	model := faux.New(
+		piParityToolTurn(piParityToolCall(0, "call_1", "block", `{}`)),
+		piParityTextTurn("done"),
+	)
+	block := agent.NewTextTool(agent.ToolSpec{Name: "block"}, func(context.Context, string, json.RawMessage) (string, error) {
+		once.Do(func() { close(started) })
+		<-release
+		return "released", nil
+	})
+	a := newAgent(t, agent.Config{Model: model, Tools: []agent.Tool{block}})
+	if a.Done() != nil {
+		t.Fatal("Done must be nil without an active run")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.Prompt(context.Background(), "go")
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tool did not start")
+	}
+	signal := a.Done()
+	if signal == nil {
+		t.Fatal("Done must expose the active run")
+	}
+	if err := a.SetSteeringMode(agent.QueueAll); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetFollowUpMode(agent.QueueOneAtATime); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetSteeringMode(agent.QueueMode("bad")); err == nil {
+		t.Fatal("invalid queue mode must be rejected")
+	}
+	close(release)
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done was not closed after the run")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pi event names: tool_execution_start/update/end.
+func TestPiParityToolExecutionEventNames(t *testing.T) {
+	if string(agent.EventToolExecutionStart) != "tool_execution_start" ||
+		string(agent.EventToolExecutionUpdate) != "tool_execution_update" ||
+		string(agent.EventToolExecutionEnd) != "tool_execution_end" {
+		t.Fatalf("unexpected event names: %q %q %q",
+			agent.EventToolExecutionStart,
+			agent.EventToolExecutionUpdate,
+			agent.EventToolExecutionEnd,
+		)
+	}
+}
